@@ -132,7 +132,59 @@ db.exec(`
   );
 `)
 
+// ---------- 迁移：冲刺版新增列与表 ----------
+function addColumnIfMissing(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name)
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+}
+// review_stage：连续答对的间隔复习阶段，答错归零
+addColumnIfMissing('questions', 'review_stage', 'INTEGER DEFAULT 0')
+// detail：条件充分性分步作答等结构化信息（JSON）
+addColumnIfMissing('redo_records', 'detail', "TEXT DEFAULT ''")
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS card_reviews (
+    user_id INTEGER NOT NULL,
+    card_key TEXT NOT NULL,
+    stage INTEGER DEFAULT 0,
+    due_at INTEGER DEFAULT 0,
+    last_grade TEXT DEFAULT '',
+    reviewed_at INTEGER DEFAULT 0,
+    review_count INTEGER DEFAULT 0,
+    PRIMARY KEY (user_id, card_key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+`)
+
 ensureMode(DATA_DIR, DB_FILE)
+
+// ---------- 间隔复习 ----------
+// 复习日按北京时间 0 点切日：到期时间取目标日的 0 点，"今天到期"即 due_at <= now。
+const DAY_MS = 86400000
+const TZ_OFFSET_MS = 8 * 3600000
+// 第 n 次连续答对后，下次复习间隔（天）
+const INTERVALS = [1, 2, 4, 7, 15, 30]
+// 连续答对达到此阶段视为"已掌握"
+const MASTERED_STAGE = 3
+
+export function dayStartAfter(days, now = Date.now()) {
+  const todayStart = Math.floor((now + TZ_OFFSET_MS) / DAY_MS) * DAY_MS - TZ_OFFSET_MS
+  return todayStart + days * DAY_MS
+}
+
+// 根据作答结果计算下一阶段；result: correct | wrong | partial
+function nextSchedule(stage, result) {
+  if (result === 'correct') {
+    const next = stage + 1
+    return {
+      stage: next,
+      due: dayStartAfter(INTERVALS[Math.min(stage, INTERVALS.length - 1)]),
+      mastery: next >= MASTERED_STAGE ? 'mastered' : 'learning',
+    }
+  }
+  // 答错或无法判定：明天再来
+  return { stage: 0, due: dayStartAfter(1), mastery: 'learning' }
+}
 
 // ---------- 工具：JSON 安全解析 ----------
 export function safeParseJson(str, fallback) {
@@ -304,6 +356,7 @@ function rowToQuestion(r) {
     tags: safeParseJson(r.tags, []),
     mastery: r.mastery,
     review_due_at: r.review_due_at,
+    review_stage: r.review_stage || 0,
     created_at: r.created_at,
     updated_at: r.updated_at,
   }
@@ -339,7 +392,8 @@ export function createQuestion(userId, data) {
       error_reason_note: data.error_reason_note || '',
       tags: JSON.stringify(data.tags || []),
       mastery: data.mastery || 'unlearned',
-      review_due_at: data.review_due_at || 0,
+      // 新题默认明天进入复习队列；导入时沿用原值
+      review_due_at: data.review_due_at ?? dayStartAfter(1),
       created_at: now,
       updated_at: now,
     })
@@ -416,6 +470,8 @@ export function listQuestions(userId, opts = {}) {
     subject,
     mastery,
     tag,
+    kp,
+    untidy = false,
     q,
     limit = 50,
     offset = 0,
@@ -435,8 +491,15 @@ export function listQuestions(userId, opts = {}) {
     params.push(mastery)
   }
   if (tag) {
-    where.push("(',' || q.tags || ',') LIKE ?")
-    params.push(`%,"${tag}",%`)
+    where.push('EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)')
+    params.push(tag)
+  }
+  if (kp) {
+    where.push('EXISTS (SELECT 1 FROM json_each(q.knowledge_points) WHERE value = ?)')
+    params.push(kp)
+  }
+  if (untidy) {
+    where.push("q.stem = ''")
   }
   if (reviewOnly) {
     where.push('q.review_due_at > 0 AND q.review_due_at <= ?')
@@ -480,7 +543,7 @@ export function listQuestions(userId, opts = {}) {
 }
 
 export function countQuestions(userId, opts = {}) {
-  const { subject, mastery, tag, reviewOnly, q } = opts
+  const { subject, mastery, tag, kp, untidy, reviewOnly, q } = opts
   const where = ['user_id = ?']
   const params = [userId]
   if (subject) {
@@ -492,8 +555,15 @@ export function countQuestions(userId, opts = {}) {
     params.push(mastery)
   }
   if (tag) {
-    where.push("(',' || tags || ',') LIKE ?")
-    params.push(`%,"${tag}",%`)
+    where.push('EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)')
+    params.push(tag)
+  }
+  if (kp) {
+    where.push('EXISTS (SELECT 1 FROM json_each(knowledge_points) WHERE value = ?)')
+    params.push(kp)
+  }
+  if (untidy) {
+    where.push("stem = ''")
   }
   if (reviewOnly) {
     where.push('review_due_at > 0 AND review_due_at <= ?')
@@ -651,12 +721,13 @@ export function listTutorSessions(userId, questionId, limit = 50) {
 }
 
 // ---------- 重做记录 ----------
-export function saveRedo(userId, questionId, record) {
+// applySchedule=false 用于导入恢复历史记录，不改动题目的复习进度
+export function saveRedo(userId, questionId, record, { applySchedule = true } = {}) {
   const info = db
     .prepare(
       `INSERT INTO redo_records
-        (question_id, user_id, redo_answer, result, duration_ms, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+        (question_id, user_id, redo_answer, result, duration_ms, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       questionId,
@@ -664,27 +735,111 @@ export function saveRedo(userId, questionId, record) {
       record.redo_answer || '',
       record.result || 'wrong',
       record.duration_ms || 0,
+      record.detail || '',
       record.created_at || Date.now()
     )
-  // 重做正确 -> 标记掌握中 -> 已掌握
-  if (record.result === 'correct') {
-    db.prepare('UPDATE questions SET mastery = ?, updated_at = ? WHERE user_id = ? AND id = ?')
-      .run('mastered', Date.now(), userId, questionId)
-  } else {
-    db.prepare('UPDATE questions SET mastery = ?, updated_at = ? WHERE user_id = ? AND id = ?')
-      .run('learning', Date.now(), userId, questionId)
+  let schedule = null
+  if (applySchedule) {
+    const q = db
+      .prepare('SELECT review_stage FROM questions WHERE user_id = ? AND id = ?')
+      .get(userId, questionId)
+    schedule = nextSchedule(q?.review_stage || 0, record.result)
+    db.prepare(
+      `UPDATE questions SET mastery = ?, review_stage = ?, review_due_at = ?, updated_at = ?
+       WHERE user_id = ? AND id = ?`
+    ).run(schedule.mastery, schedule.stage, schedule.due, Date.now(), userId, questionId)
   }
-  return info.lastInsertRowid
+  return { id: info.lastInsertRowid, schedule }
 }
 
 export function listRedos(userId, questionId) {
   return db
     .prepare(
-      `SELECT id, redo_answer, result, duration_ms, created_at
+      `SELECT id, redo_answer, result, duration_ms, detail, created_at
        FROM redo_records WHERE user_id = ? AND question_id = ?
        ORDER BY created_at ASC`
     )
     .all(userId, questionId)
+}
+
+// ---------- 公式卡片复习 ----------
+export function listCardReviews(userId) {
+  return db
+    .prepare('SELECT card_key, stage, due_at, last_grade, reviewed_at, review_count FROM card_reviews WHERE user_id = ?')
+    .all(userId)
+}
+
+// grade: good（记得）| fuzzy（模糊）| again（忘了）
+export function gradeCard(userId, cardKey, grade) {
+  const row = db
+    .prepare('SELECT stage, review_count FROM card_reviews WHERE user_id = ? AND card_key = ?')
+    .get(userId, cardKey)
+  const stage = row?.stage || 0
+  let next
+  if (grade === 'good') {
+    next = { stage: stage + 1, due: dayStartAfter(INTERVALS[Math.min(stage, INTERVALS.length - 1)]) }
+  } else if (grade === 'fuzzy') {
+    next = { stage: Math.max(stage - 1, 0), due: dayStartAfter(1) }
+  } else {
+    // 忘了：阶段归零，今天内再出现
+    next = { stage: 0, due: Date.now() }
+  }
+  const now = Date.now()
+  db.prepare(
+    `INSERT INTO card_reviews (user_id, card_key, stage, due_at, last_grade, reviewed_at, review_count)
+     VALUES (?, ?, ?, ?, ?, ?, 1)
+     ON CONFLICT(user_id, card_key) DO UPDATE SET
+       stage = excluded.stage, due_at = excluded.due_at, last_grade = excluded.last_grade,
+       reviewed_at = excluded.reviewed_at, review_count = card_reviews.review_count + 1`
+  ).run(userId, cardKey, next.stage, next.due, grade, now)
+  return next
+}
+
+// ---------- 知识点统计 ----------
+// 每个知识点：题目数、已掌握数、最近一次作答是否答错
+export function getKnowledgeStats(userId) {
+  const rows = db
+    .prepare(
+      `SELECT kp.value AS kp, q.mastery AS mastery, q.id AS id,
+              (SELECT result FROM redo_records r WHERE r.question_id = q.id ORDER BY r.created_at DESC LIMIT 1) AS last_result
+       FROM questions q, json_each(q.knowledge_points) kp
+       WHERE q.user_id = ? AND q.subject = 'math'`
+    )
+    .all(userId)
+  const map = {}
+  for (const r of rows) {
+    const s = (map[r.kp] ||= { total: 0, mastered: 0, last_wrong: 0 })
+    s.total += 1
+    if (r.mastery === 'mastered') s.mastered += 1
+    if (r.last_result === 'wrong') s.last_wrong += 1
+  }
+  return map
+}
+
+// 最近 N 天的作答统计（用于今日进度与连续打卡）
+export function getActivity(userId, days = 30) {
+  const since = dayStartAfter(-(days - 1))
+  const redos = db
+    .prepare('SELECT created_at, result, duration_ms FROM redo_records WHERE user_id = ? AND created_at >= ?')
+    .all(userId, since)
+  const cards = db
+    .prepare('SELECT reviewed_at FROM card_reviews WHERE user_id = ? AND reviewed_at >= ?')
+    .all(userId, since)
+  const dayKey = (ts) => Math.floor((ts + TZ_OFFSET_MS) / DAY_MS)
+  const byDay = {}
+  for (const r of redos) {
+    const d = (byDay[dayKey(r.created_at)] ||= { redo: 0, correct: 0, cards: 0 })
+    d.redo += 1
+    if (r.result === 'correct') d.correct += 1
+  }
+  for (const c of cards) {
+    ;(byDay[dayKey(c.reviewed_at)] ||= { redo: 0, correct: 0, cards: 0 }).cards += 1
+  }
+  const today = dayKey(Date.now())
+  let streak = 0
+  // 今天还没学不打断连续天数，从昨天开始往前数
+  for (let d = byDay[today] ? today : today - 1; byDay[d]; d--) streak++
+  return { today: byDay[today] || { redo: 0, correct: 0, cards: 0 }, streak }
 }
 
 // ---------- 统计 ----------
@@ -707,8 +862,12 @@ export function getStats(userId) {
       `SELECT COUNT(*) AS c FROM questions WHERE user_id = ? AND review_due_at > 0 AND review_due_at <= ?`
     )
     .get(userId, Date.now()).c
+  const untidy = db
+    .prepare("SELECT COUNT(*) AS c FROM questions WHERE user_id = ? AND stem = ''")
+    .get(userId).c
   return {
     total,
+    untidy,
     by_subject: Object.fromEntries(bySubject.map((r) => [r.subject, r.c])),
     by_mastery: Object.fromEntries(byMastery.map((r) => [r.mastery, r.c])),
     review_due: reviewDue,

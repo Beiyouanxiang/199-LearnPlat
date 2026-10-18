@@ -3,7 +3,22 @@
 // OCR provider 与 tutor provider 分离，模型名、端点、能力可独立配置。
 // 真实 Key 仅服务端环境变量；缺 Key 时返回明确错误，不伪造成功结果。
 
+import { SUFFICIENCY_OPTIONS } from '../content/math.js'
+
 const TUTOR_TIMEOUT_MS = Number(process.env.TUTOR_TIMEOUT_MS || 120_000)
+// 数学讲解需要稳定推导：默认较低温度；推理模型（如 deepseek-reasoner）需要更大的输出上限
+const TUTOR_TEMPERATURE = Number(process.env.TUTOR_TEMPERATURE || 0.3)
+const TUTOR_MAX_TOKENS = Number(process.env.TUTOR_MAX_TOKENS || 4096)
+
+// 公式统一用 KaTeX 可渲染的 LaTeX
+const MATH_FORMAT_RULE =
+  '数学公式用 LaTeX 书写：行内用 $...$，独立成行用 $$...$$（前端用 KaTeX 渲染）。'
+
+const HINT_LEVELS = {
+  1: '这是第 1 级提示：只点明本题考查的知识点和思考方向，不给任何具体计算或步骤，控制在 80 字以内。',
+  2: '这是第 2 级提示（学生看过第 1 级提示仍没思路）：指出解题的关键条件或切入点，并给出第一步该怎么做，不要继续往下算，控制在 150 字以内。',
+  3: '这是第 3 级提示（最后一级）：给出完整的解题路径和主要步骤，但最后一步计算或选项判断留给学生自己完成，不要说出最终答案，控制在 250 字以内。',
+}
 
 // 按 provider 名解析其 Key / 端点 / 模型；缺 Key 返回 null。
 // glm 文字模型与视觉模型（glm-4v-plus 等）共用同一 Key；deepseek-chat 为纯文本，无视觉。
@@ -82,6 +97,7 @@ const FRAMEWORKS = {
     '【考点】本题考查的知识点是什么',
     '【关键条件】题干中哪些条件是解题的关键',
     '【解题过程】给出完整的推导步骤',
+    '【快速解法】考场上更快的做法（特值法、选项代入、排除法、图像法等），没有就写"无"',
     '【易错点】这类题常见误区',
     '【验证方法】如何快速检验答案正确',
   ],
@@ -90,8 +106,9 @@ const FRAMEWORKS = {
     '【考点】本题考查的知识点',
     '【结论与条件】明确题干结论，以及条件(1)、条件(2)分别是什么',
     '【充分性判断方法】判断条件是否充分推出结论的方法',
-    '【逐条件分析】分别分析条件(1)、(2)单独是否充分，以及联立是否充分',
-    '【易错点】充分性判断常见误区（如把必要当充分）',
+    '【逐条件分析】分别分析条件(1)、(2)单独是否充分，以及联立是否充分；判断"不充分"时给出具体反例',
+    '【得出选项】根据上一步的判断对照 A–E 定义得出选项',
+    '【易错点】充分性判断常见误区（如把必要当充分、忘记先单独判断）',
   ],
   // 逻辑：逻辑推理
   logic_reasoning: [
@@ -132,40 +149,49 @@ const TYPE_LABEL = {
 }
 
 // ---------- 构造 system prompt ----------
-function buildSystemPrompt(question, mode, visionUsed) {
+function buildSystemPrompt(question, mode, visionUsed, hintLevel) {
   const subject = SUBJECT_LABEL[question.subject] || '综合'
   const type = TYPE_LABEL[question.question_type] || question.question_type
   const framework = FRAMEWORKS[question.question_type] || FRAMEWORKS.problem_solving
 
   const base = [
-    '你是一位为考生准备 199 管理类联考综合能力的私人辅导老师，针对妻子备考，态度温和、讲解清晰、循序渐进。',
+    '你是一位帮考生准备 199 管理类联考综合能力的私人辅导老师。考生数学基础较弱，请态度温和、讲解清晰、循序渐进，不说"很简单""显然"之类的话。',
     `本题属于【${subject} · ${type}】题型。`,
   ]
+
+  if (question.question_type === 'sufficient_condition') {
+    base.push(
+      '条件充分性判断的选项定义固定如下（以此为准）：',
+      ...Object.entries(SUFFICIENCY_OPTIONS).map(([k, v]) => `${k}. ${v}`),
+      '"条件充分"指：由条件能推出题干结论（条件成立时结论一定成立）。'
+    )
+  }
 
   if (mode === 'hint') {
     base.push(
       '现在请只给出一个【提示】，引导学生自己思考，不要直接给出完整答案或标准答案。',
-      '提示应指出思考方向或关键切入点，简短有力，控制在 150 字以内。',
+      HINT_LEVELS[hintLevel] || HINT_LEVELS[1],
       '如果题目信息不足以给出有效提示，请明确说明缺了什么，不要编造。',
-      '数学公式用纯文本写（如 x/2、a²+b²=c²），不要用 LaTeX（\\frac、$ 符号等），前端不渲染。'
+      MATH_FORMAT_RULE
     )
   } else if (mode === 'explain') {
     base.push(
       '现在请按以下框架完整讲解本题（可用 Markdown）:',
       ...framework,
-      '讲解要清晰、准确。涉及公式请用行内或行间代码表示。',
+      '讲解要清晰、准确。',
       '重要规则：',
       '1. 不要编造"标准答案"或"官方答案"，也不要编造教材出处、页码。',
       '2. 区分"考生自己填写的答案"与"你推导出的答案"。考生答案在下方会标注，你的推导要独立得出，若与考生答案矛盾，请明确指出并重新检查。',
       '3. 若计算或逻辑出现矛盾，先说明矛盾点，再重新推导，不要强行圆场。',
-      '4. 数学公式一律用纯文本写（如 a² + b² = c²、x/2、3×4=12），不要用 LaTeX 语法（不要输出 \\frac、\\times、\\( \\)、\\[ \\]、$ 符号），前端不渲染 LaTeX，原始符号会直接显示给用户。'
+      '4. 计算完成后把关键结果代回题目条件验算一遍。',
+      '5. ' + MATH_FORMAT_RULE
     )
   } else {
     // discuss
     base.push(
       '现在是自由讨论环节，根据考生的追问继续讲解。',
       '仍然遵守：不编造标准答案与教材出处；计算/逻辑矛盾要说明；不清楚就追问或要求补充。',
-      '数学公式用纯文本写，不要用 LaTeX（\\frac、$ 符号等），前端不渲染。'
+      MATH_FORMAT_RULE
     )
   }
 
@@ -245,8 +271,8 @@ async function callChat(baseUrl, apiKey, model, messages, { signal } = {}) {
       body: JSON.stringify({
         model,
         messages,
-        temperature: 0.6,
-        max_tokens: 2048,
+        temperature: TUTOR_TEMPERATURE,
+        max_tokens: TUTOR_MAX_TOKENS,
       }),
       signal: controller.signal,
     })
@@ -290,7 +316,7 @@ export async function callTutor(opts) {
     return { error: '服务端未配置 AI 老师 API Key', status: 503 }
   }
 
-  const { mode = 'hint', question, history = [], userPrompt = '', imageDataUris = [], useImage = false, signal } = opts
+  const { mode = 'hint', question, history = [], userPrompt = '', imageDataUris = [], useImage = false, hintLevel = 1, signal } = opts
 
   // 决定用哪个 provider：含图且开启图像且 vision 可用 -> vision provider；否则默认 provider
   const wantVision = useImage && imageDataUris.length > 0 && isVisionAvailable()
@@ -299,7 +325,7 @@ export async function callTutor(opts) {
   const baseUrl = wantVision ? ACTIVE.visionBaseUrl : ACTIVE.baseUrl
   const apiKey = wantVision ? ACTIVE.visionKey : ACTIVE.apiKey
 
-  const systemPrompt = buildSystemPrompt(question, mode, wantVision)
+  const systemPrompt = buildSystemPrompt(question, mode, wantVision, hintLevel)
   const messages = [{ role: 'system', content: systemPrompt }]
 
   // 历史（discuss 上下文）

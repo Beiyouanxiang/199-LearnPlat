@@ -31,7 +31,18 @@ import db, {
   saveRedo,
   listRedos,
   getStats,
+  getKnowledgeStats,
+  getActivity,
+  listCardReviews,
+  gradeCard,
 } from './db.js'
+import {
+  KNOWLEDGE_TREE,
+  FORMULA_CARDS,
+  CARD_KEYS,
+  SUFFICIENCY_OPTIONS,
+  moduleOf,
+} from './content/math.js'
 import {
   hashPassword,
   comparePassword,
@@ -119,7 +130,8 @@ function withAccessUrl(im) {
 // ---------- Express ----------
 const app = express()
 app.disable('x-powered-by')
-app.set('trust proxy', true)
+// 生产经本机 Nginx 反代，只信任回环地址的 X-Forwarded-For，避免伪造 IP 绕过限流
+app.set('trust proxy', 'loopback')
 app.use(express.json({ limit: '20mb' }))
 
 // 安全响应头
@@ -197,6 +209,13 @@ function serveFromNodeModules(routePath, pkgPath) {
 }
 serveFromNodeModules('/vendor/marked.min.js', 'marked/marked.min.js')
 serveFromNodeModules('/vendor/purify.min.js', 'dompurify/dist/purify.min.js')
+// KaTeX：js/css/字体整目录提供（css 内以相对路径引用 fonts/）
+try {
+  const katexDist = path.dirname(require.resolve('katex/dist/katex.min.js'))
+  app.use('/vendor/katex', express.static(katexDist, { index: false, maxAge: '7d' }))
+} catch (err) {
+  console.warn(`[exam199] 无法定位 katex: ${err.message}`)
+}
 
 // ---------- 静态资源 ----------
 app.use(express.static(path.join(ROOT, 'public'), { index: 'index.html' }))
@@ -327,12 +346,18 @@ app.post('/api/questions', requireAuth, async (req, res) => {
     error_reason_note: b.error_reason_note || '',
     tags: Array.isArray(b.tags) ? b.tags : [],
     mastery: b.mastery || 'unlearned',
-    review_due_at: b.review_due_at || 0,
+    // 未指定时由 createQuestion 默认安排明天复习
+    review_due_at: Number.isFinite(b.review_due_at) ? b.review_due_at : undefined,
   }
-  if (!data.stem && !data.stem_raw) {
-    return res.status(400).json({ error: '题干不能为空' })
+  const hasImages = Array.isArray(b.images) && b.images.length > 0
+  // 快速收藏：只有图片、暂不录题干也允许保存，之后再整理
+  if (!data.stem && !data.stem_raw && !hasImages) {
+    return res.status(400).json({ error: '题干和图片至少要有一项' })
   }
-  if (!data.title) data.title = deriveTitle(data.stem || data.stem_raw)
+  if (!data.title) {
+    data.title = deriveTitle(data.stem || data.stem_raw) ||
+      `待整理 · ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+  }
 
   const question = createQuestion(req.userId, data)
 
@@ -358,6 +383,8 @@ app.get('/api/questions', requireAuth, (req, res) => {
     subject: req.query.subject || '',
     mastery: req.query.mastery || '',
     tag: req.query.tag || '',
+    kp: req.query.kp || '',
+    untidy: req.query.untidy === '1',
     q: req.query.q || '',
     limit: Math.min(Number(req.query.limit) || 50, 200),
     offset: Math.max(Number(req.query.offset) || 0, 0),
@@ -405,6 +432,11 @@ app.patch('/api/questions/:id', requireAuth, (req, res) => {
   if (Array.isArray(b.options)) patch.options = b.options
   if (Array.isArray(b.knowledge_points)) patch.knowledge_points = b.knowledge_points
   if (Array.isArray(b.tags)) patch.tags = b.tags
+  // 快速收藏的题补上题干后，用题干首行替换"待整理"占位标题
+  if (patch.stem && patch.title === undefined) {
+    const existing = getQuestion(req.userId, Number(req.params.id))
+    if (existing && existing.title.startsWith('待整理')) patch.title = deriveTitle(patch.stem)
+  }
   const q = updateQuestion(req.userId, Number(req.params.id), patch)
   if (!q) return res.status(404).json({ error: '题目不存在' })
   q.images = listImages(req.userId, q.id).map(withAccessUrl)
@@ -489,6 +521,13 @@ app.post('/api/questions/:id/tutor', requireAuth, tutorRateLimit, async (req, re
     imageDataUris = imgs.map((im) => readImageAsDataUri(getImageAbsPath(im.file_path), im.mime)).filter(Boolean)
   }
 
+  // 分级提示：同一题第 n 次请求提示，给第 n 级（最多 3 级），逐步加深
+  let hintLevel = 0
+  if (mode === 'hint') {
+    const prior = listTutorSessions(req.userId, qid, 100).filter((s) => s.mode === 'hint').length
+    hintLevel = Math.min(prior + 1, 3)
+  }
+
   // discuss 模式带上历史
   let history = []
   if (mode === 'discuss') {
@@ -506,6 +545,7 @@ app.post('/api/questions/:id/tutor', requireAuth, tutorRateLimit, async (req, re
     userPrompt,
     imageDataUris,
     useImage,
+    hintLevel,
   })
 
   if (result.error) {
@@ -528,6 +568,7 @@ app.post('/api/questions/:id/tutor', requireAuth, tutorRateLimit, async (req, re
     id: sessionId,
     requestId,
     mode,
+    hintLevel,
     markdown: result.markdown,
     provider: result.provider,
     model: result.model,
@@ -551,12 +592,16 @@ app.post('/api/questions/:id/redo', requireAuth, (req, res) => {
   const q = getQuestion(req.userId, qid)
   if (!q) return res.status(404).json({ error: '题目不存在' })
   const result = ['correct', 'wrong', 'partial'].includes(req.body?.result) ? req.body.result : 'wrong'
-  const id = saveRedo(req.userId, qid, {
+  const detail = req.body?.detail && typeof req.body.detail === 'object'
+    ? JSON.stringify(req.body.detail).slice(0, 2000)
+    : ''
+  const { id, schedule } = saveRedo(req.userId, qid, {
     redo_answer: String(req.body?.redoAnswer || '').slice(0, 500),
     result,
-    duration_ms: Number(req.body?.durationMs) || 0,
+    duration_ms: Math.min(Math.max(Number(req.body?.durationMs) || 0, 0), 6 * 3600000),
+    detail,
   })
-  res.json({ id, result, mastery: result === 'correct' ? 'mastered' : 'learning' })
+  res.json({ id, result, mastery: schedule.mastery, review_stage: schedule.stage, review_due_at: schedule.due })
 })
 
 app.get('/api/questions/:id/redo', requireAuth, (req, res) => {
@@ -599,6 +644,78 @@ app.get('/api/tags', requireAuth, (req, res) => {
 
 app.get('/api/stats', requireAuth, (req, res) => {
   res.json(getStats(req.userId))
+})
+
+// ---------- 数学：知识点 / 公式卡片 / 今日任务 ----------
+app.get('/api/knowledge', requireAuth, (req, res) => {
+  const stats = getKnowledgeStats(req.userId)
+  res.json({
+    tree: KNOWLEDGE_TREE,
+    stats,
+    sufficiency_options: SUFFICIENCY_OPTIONS,
+  })
+})
+
+function cardsWithProgress(userId) {
+  const progress = Object.fromEntries(listCardReviews(userId).map((r) => [r.card_key, r]))
+  return FORMULA_CARDS.map((c) => {
+    const p = progress[c.key]
+    return {
+      ...c,
+      module: c.kp ? moduleOf(c.kp) : '条件充分性',
+      stage: p?.stage || 0,
+      due_at: p?.due_at || 0,
+      review_count: p?.review_count || 0,
+      is_new: !p,
+    }
+  })
+}
+
+// 今日卡片：已到期的 + 每天限量引入新卡（按内置顺序）
+const NEW_CARDS_PER_DAY = 12
+function dueCards(userId) {
+  const all = cardsWithProgress(userId)
+  const now = Date.now()
+  const due = all.filter((c) => !c.is_new && c.due_at <= now)
+  const fresh = all.filter((c) => c.is_new).slice(0, NEW_CARDS_PER_DAY)
+  return { due, fresh, total: all.length, learned: all.filter((c) => !c.is_new).length }
+}
+
+app.get('/api/cards', requireAuth, (req, res) => {
+  if (req.query.all === '1') return res.json({ items: cardsWithProgress(req.userId) })
+  const { due, fresh, total, learned } = dueCards(req.userId)
+  res.json({ items: [...due, ...fresh], due: due.length, fresh: fresh.length, total, learned })
+})
+
+app.post('/api/cards/:key/grade', requireAuth, (req, res) => {
+  const key = String(req.params.key)
+  if (!CARD_KEYS.has(key)) return res.status(404).json({ error: '卡片不存在' })
+  const grade = ['good', 'fuzzy', 'again'].includes(req.body?.grade) ? req.body.grade : 'again'
+  res.json(gradeCard(req.userId, key, grade))
+})
+
+app.get('/api/today', requireAuth, (req, res) => {
+  const stats = getStats(req.userId)
+  const cards = dueCards(req.userId)
+  const activity = getActivity(req.userId)
+  // 薄弱知识点：未掌握题目多、最近答错多的排前面
+  const kpStats = getKnowledgeStats(req.userId)
+  const weak = Object.entries(kpStats)
+    .map(([kp, s]) => ({ kp, module: moduleOf(kp), ...s, unmastered: s.total - s.mastered }))
+    .filter((s) => s.unmastered > 0)
+    .sort((a, b) => b.last_wrong - a.last_wrong || b.unmastered - a.unmastered)
+    .slice(0, 5)
+  res.json({
+    review_due: stats.review_due,
+    untidy: stats.untidy,
+    total: stats.total,
+    cards_due: cards.due.length,
+    cards_new: cards.fresh.length,
+    cards_learned: cards.learned,
+    cards_total: cards.total,
+    activity,
+    weak,
+  })
 })
 
 // ---------- 导出 ----------
@@ -680,8 +797,9 @@ app.post('/api/import', requireAuth, async (req, res) => {
           redo_answer: r.redo_answer || '',
           result: r.result || 'wrong',
           duration_ms: r.duration_ms || 0,
+          detail: typeof r.detail === 'string' ? r.detail : '',
           created_at: r.created_at || Date.now(),
-        })
+        }, { applySchedule: false })
       }
     }
     imported += 1
