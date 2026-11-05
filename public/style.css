@@ -196,6 +196,9 @@ a { color: inherit; text-decoration: none; }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { padding: 4px 10px; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--surface); font-size: 12px; cursor: pointer; color: var(--text-secondary); }
 .chip.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.chip.suggested { box-shadow: 0 0 0 2px var(--warn); }
+.ai-suggest { margin-bottom: 12px; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--warn-bg); border: 1px solid var(--warn); font-size: 13px; }
+.ai-suggest .dim { margin-top: 4px; }
 
 /* ---------- 统计 ---------- */
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 16px; }
@@ -341,4 +344,69 @@ a { color: inherit; text-decoration: none; }
   .task-card { flex-wrap: wrap; }
   .task-card .btn { width: 100%; }
   .topbar-right .btn-ghost { padding: 6px 8px; }
+}
+
+/* ========== 题型精讲 ========== */
+.freq { color: #f59e0b; font-size: 12px; letter-spacing: 1px; white-space: nowrap; }
+.topic-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.st-new { background: #f3f4f6; color: var(--text-dim); }
+.st-viewed { background: var(--primary-light); color: var(--primary); }
+.st-practicing { background: var(--warn-bg); color: #b45309; }
+.st-done { background: var(--ok-bg); color: #15803d; }
+.topic-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; }
+.topic-summary strong { font-size: 20px; color: var(--primary); }
+.topic-search { width: 100%; padding: 12px 14px; font-size: 15px; border: 2px solid var(--primary); border-radius: var(--radius); background: var(--surface); }
+.topic-search:focus { outline: none; box-shadow: 0 0 0 3px var(--primary-light); }
+.topic-search-hint { font-size: 12px; margin: 6px 2px 4px; }
+.chapter-title { display: flex; align-items: baseline; }
+.chapter-intro { font-size: 13px; margin: -6px 0 10px; }
+.topic-list { display: flex; flex-direction: column; gap: 8px; }
+.topic-row { display: block; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+.topic-row:hover { border-color: var(--primary); }
+.topic-row.is-next { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-light); }
+.tr-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tr-name { font-weight: 600; font-size: 15px; }
+.tr-head .topic-status { margin-left: auto; }
+.tr-think { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+.tr-signals { font-size: 12px; margin-top: 4px; }
+.topic-title { font-size: 22px; }
+.think-box { background: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%); border: 1px solid #c7d2fe; border-left: 4px solid var(--primary); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 8px; }
+.think-box .tb-label { font-size: 13px; font-weight: 600; color: var(--primary); margin-bottom: 4px; }
+.think-box .tb-text { font-size: 16px; font-weight: 600; line-height: 1.7; }
+.topic-sec { margin-top: 20px; }
+.topic-sec h2 { font-size: 15px; margin: 0 0 8px; color: var(--text); }
+.topic-sec ul, .topic-sec ol { margin: 0; padding-left: 22px; line-height: 1.9; }
+.signal-list li::marker { color: var(--primary); }
+.trap-list li::marker { color: var(--danger); }
+.topic-two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+.problem-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.practice-list { display: flex; flex-direction: column; gap: 12px; }
+.pc-head { display: flex; gap: 8px; align-items: center; font-weight: 600; margin-bottom: 6px; }
+.pc-type { display: inline-block; font-size: 11px; color: var(--primary); background: var(--primary-light); padding: 1px 8px; border-radius: 10px; margin-bottom: 6px; }
+.pc-stem { font-size: 15px; line-height: 1.8; }
+.pc-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 4px 14px; margin: 8px 0 12px; font-size: 15px; }
+.pc-answer { margin-top: 10px; }
+.ex-solution { margin-top: 10px; padding: 12px; background: #f9fafb; border-radius: var(--radius-sm); line-height: 1.8; }
+.route-list { margin: 0; padding-left: 0; list-style: none; counter-reset: route; }
+.route-list > li { counter-increment: route; position: relative; padding: 10px 12px 10px 44px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); margin-bottom: 8px; }
+.route-list > li::before { content: counter(route); position: absolute; left: 12px; top: 10px; width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: #fff; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.route-q { font-weight: 600; margin-bottom: 4px; }
+.route-a { color: var(--text-secondary); line-height: 1.75; }
+.route-a p { margin: 0 0 4px; }
+.tool-list { margin: 0; padding-left: 20px; line-height: 1.9; }
+.ex-think-label { font-weight: 600; color: var(--primary); margin-bottom: 4px; }
+.ex-think { margin: 0 0 10px; padding-left: 20px; line-height: 1.8; }
+.ex-fast { margin-top: 8px; padding: 8px 10px; background: var(--warn-bg); border-radius: var(--radius-sm); }
+.pc-hint { margin: 8px 0; padding: 8px 10px; background: var(--primary-light); border-radius: var(--radius-sm); line-height: 1.75; }
+.practice-note { font-size: 13px; margin-bottom: 10px; }
+.level-badge { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
+.lv-1 { background: var(--ok-bg); color: #15803d; }
+.lv-2 { background: var(--primary-light); color: var(--primary); }
+.lv-3 { background: var(--danger-bg); color: #b91c1c; }
+.ex-answer { font-weight: 700; color: var(--ok); margin-bottom: 4px; }
+.problem-card > .btn { margin-top: 10px; }
+.topic-nav { display: flex; justify-content: space-between; margin: 28px 0 12px; gap: 8px; }
+@media (max-width: 640px) {
+  .topic-two { grid-template-columns: 1fr; }
+  .think-box .tb-text { font-size: 15px; }
 }

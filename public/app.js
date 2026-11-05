@@ -258,6 +258,8 @@
       cards: renderCards,
       more: renderMore,
       question: renderQuestion,
+      topics: renderTopics,
+      topic: renderTopic,
     }
     ;(map[name] || renderHome)(param, query).catch((err) => {
       if (err.message.includes('未登录')) { API.clearToken(); location.reload() }
@@ -288,6 +290,12 @@
     view.appendChild(banner)
 
     const tasks = h('div', { class: 'task-list' })
+    if (today.next_topic) {
+      const nt = today.next_topic
+      tasks.appendChild(taskCard('📘', '题型精讲', [`${nt.chapter} · `, mdInline(nt.name), `（已过关 ${today.topics_done}/${today.topics_total}）`], nt.status === 'new' ? '开始学' : '继续学', () => { location.hash = '#/topic/' + nt.id }))
+    } else {
+      tasks.appendChild(taskCard('📘', '题型精讲', `代数 ${today.topics_total} 个题型全部过关！`, '回顾', () => { location.hash = '#/topics' }, true))
+    }
     tasks.appendChild(taskCard('🔁', '错题复习', today.review_due
       ? `${today.review_due} 道题到期，限时重做检验是否真的会了`
       : '今天没有到期的错题', today.review_due ? '开始复习' : null, () => { location.hash = '#/review' }, !today.review_due))
@@ -364,6 +372,8 @@
     subjectSel.addEventListener('change', () => { refreshTypes(); refreshKp() })
     refreshTypes()
     if (init.question_type) typeSel.value = init.question_type
+    let typeTouched = false
+    typeSel.addEventListener('change', () => { typeTouched = true })
 
     // 答案：数学题用 A–E 按钮，其他用文本
     const correctInput = h('input', { type: 'text', placeholder: '如 A / 详见解析', value: init.correct_answer || '' })
@@ -391,6 +401,7 @@
 
     // 知识点：数学按模块分组 chip 多选，另可补充自定义
     const selectedKp = new Set(init.knowledge_points || [])
+    const suggestedKp = new Set() // AI 预选的知识点，高亮提示待确认
     const builtin = new Set(KNOWLEDGE.tree.flatMap((m) => m.points))
     const customInput = h('input', { type: 'text', placeholder: '其他知识点，逗号分隔', value: [...selectedKp].filter((k) => !builtin.has(k)).join(',') })
     const kpWrap = h('div', { class: 'kp-picker' })
@@ -400,7 +411,7 @@
       for (const m of KNOWLEDGE.tree) {
         kpWrap.appendChild(h('div', { class: 'kp-group' }, [
           h('span', { class: 'kp-module' }, m.module),
-          h('div', { class: 'chip-row' }, m.points.map((p) => h('button', { type: 'button', class: 'chip' + (selectedKp.has(p) ? ' active' : ''), onclick: (ev) => {
+          h('div', { class: 'chip-row' }, m.points.map((p) => h('button', { type: 'button', class: 'chip' + (selectedKp.has(p) ? ' active' : '') + (suggestedKp.has(p) ? ' suggested' : ''), title: suggestedKp.has(p) ? 'AI 建议，请确认' : null, onclick: (ev) => {
             selectedKp.has(p) ? selectedKp.delete(p) : selectedKp.add(p)
             ev.currentTarget.classList.toggle('active', selectedKp.has(p))
           } }, p))),
@@ -412,7 +423,10 @@
     const correctField = field('正确答案', h('div', {}, [letterPicker(correctInput), correctInput]))
     const userField = field('你的答案', h('div', {}, [letterPicker(userInput), userInput]))
 
+    const suggestNote = h('div', { class: 'ai-suggest', hidden: '' })
+
     const el = h('div', { class: 'q-form' }, [
+      suggestNote,
       h('div', { class: 'form-grid' }, [field('学科', subjectSel), field('题型', typeSel), correctField, userField]),
       field('知识点', h('div', {}, [kpWrap, customInput])),
       field('错因', errorRow),
@@ -434,7 +448,31 @@
         tags: split(tagInput.value),
       }
     }
-    return { el, values, subjectSel, typeSel }
+    // 应用 AI 预填建议：只动数学题；题型在用户未手动改过时才覆盖；
+    // 知识点在用户还没选时才预选（已选则只高亮）；答案仅展示，不写入正确答案。
+    function applySuggestion(s) {
+      if (!s || subjectSel.value !== 'math') return
+      const kps = (s.knowledge_points || []).filter((k) => builtin.has(k))
+      const typeOk = TYPES.math.some((t) => t.key === s.question_type)
+      if (!kps.length && !typeOk && !s.answer) return
+      if (typeOk && !typeTouched) typeSel.value = s.question_type
+      const preselect = selectedKp.size === 0
+      suggestedKp.clear()
+      for (const k of kps) {
+        suggestedKp.add(k)
+        if (preselect) selectedKp.add(k)
+      }
+      refreshKp()
+      const parts = []
+      if (typeOk) parts.push('题型「' + typeLabel(s.question_type) + '」')
+      if (kps.length) parts.push('知识点「' + kps.join('、') + '」')
+      suggestNote.innerHTML = ''
+      suggestNote.appendChild(h('div', {}, '✨ AI 建议：' + (parts.join('，') || '无') + (kps.length ? '（已高亮' + (preselect ? '并预选' : '') + '，不对就点掉）' : '')))
+      if (s.answer) suggestNote.appendChild(h('div', { class: 'dim' }, '可能的答案：' + s.answer + '（AI 推测，未核实，不会自动填入）'))
+      suggestNote.hidden = false
+    }
+
+    return { el, values, subjectSel, typeSel, applySuggestion }
   }
 
   function field(label, child) {
@@ -572,12 +610,22 @@
         toast('识别完成，请校对')
         const blocks = splitQuestions(md)
         if (blocks.length > 1) showSplitPrompt(blocks, md)
+        suggestMeta(md, seq)
       } catch (err) {
         ocrStatus.textContent = ''
         toast('识别失败：' + err.message)
       } finally {
         ocrBtn.disabled = images.length === 0
       }
+    }
+    // OCR 后让 AI 预填题型/知识点；未配置 Key 或失败时静默跳过，不影响录题
+    async function suggestMeta(md, seq) {
+      if (!KNOWLEDGE.suggest || !md.trim()) return
+      try {
+        const s = await API.req('/api/suggest', { method: 'POST', body: { stem: md } })
+        if (seq !== ocrSeq || !document.body.contains(form.el)) return
+        form.applySuggestion(s)
+      } catch { /* 静默 */ }
     }
     // 按行首题号（"1. "/"1、"/"（1）" 等）切块
     function splitQuestions(md) {
@@ -668,7 +716,7 @@
 
   // ---------- 错题列表 ----------
   async function renderList(_, query) {
-    view.appendChild(h('h1', { class: 'page-title' }, '错题本'))
+    view.appendChild(h('div', { class: 'page-head' }, [h('h1', { class: 'page-title' }, '错题本'), h('a', { class: 'btn btn-primary btn-sm', href: '#/capture' }, '📸 录题')]))
     const subjectSel = h('select', {}, [h('option', { value: '' }, '全部学科'), ...SUBJECTS.map((s) => h('option', { value: s.key }, s.label))])
     const masterySel = h('select', {}, [h('option', { value: '' }, '全部状态'), ...MASTERY.map((m) => h('option', { value: m.key }, m.label))])
     const kpSel = h('select', {}, [
@@ -751,6 +799,49 @@
     ])
   }
 
+  // ---------- 条件充分性分步判断（重做与题型练习共用） ----------
+  // 分三步判断，自动换算成选项；onSubmit(letter, steps) 收到选项和每一步的判断
+  function suffSteps(onSubmit, extraActions = []) {
+    const st = { s1: null, s2: null, joint: null }
+    const box = h('div', { class: 'suff-steps' })
+    const out = h('div', { class: 'suff-out' })
+    const submit = h('button', { class: 'btn btn-primary', disabled: '', onclick: () => onSubmit(suffLetter(st), { ...st }) }, '提交')
+    const step = (key, label) => h('div', { class: 'suff-step', 'data-key': key }, [
+      h('div', { class: 'ss-label' }, label),
+      h('div', { class: 'chip-row' }, [['充分', true], ['不充分', false]].map(([t, v]) => h('button', { type: 'button', class: 'chip', onclick: (e) => {
+        st[key] = v
+        $$('.chip', e.currentTarget.parentNode).forEach((x) => x.classList.toggle('active', x === e.currentTarget))
+        refresh()
+      } }, t))),
+    ])
+    const jointStep = step('joint', '③ 两个条件联合起来，能推出结论吗？')
+    box.append(step('s1', '① 只用条件(1)，能推出结论吗？'), step('s2', '② 只用条件(2)，能推出结论吗？'), jointStep)
+    function refresh() {
+      const needJoint = st.s1 === false && st.s2 === false
+      jointStep.hidden = !needJoint
+      if (!needJoint) st.joint = null
+      const letter = st.s1 !== null && st.s2 !== null ? suffLetter(st) : ''
+      out.textContent = letter ? `你的判断对应选项：${letter}` : ''
+      submit.disabled = !letter
+    }
+    refresh()
+    return h('div', {}, [box, out, h('div', { class: 'redo-actions' }, [submit, ...extraActions])])
+  }
+
+  // 逐步对照：指出条件充分性判断错在哪一步
+  function suffReview(correctLetter, detail) {
+    const exp = SUFF_STEPS[String(correctLetter).toUpperCase()]
+    if (!exp || !detail) return null
+    const yn = (v) => (v ? '充分' : '不充分')
+    const rows = [['条件(1)单独', 's1'], ['条件(2)单独', 's2'], ['联合', 'joint']]
+      .filter(([, k]) => exp[k] !== undefined || detail[k] !== null)
+      .map(([label, k]) => {
+        const ok = exp[k] === detail[k]
+        return h('li', { class: ok ? 'ok' : 'bad' }, `${ok ? '✓' : '✗'} ${label}：你判断${detail[k] === null ? '（未判断）' : yn(detail[k])}，应为${exp[k] === undefined ? '（无需判断）' : yn(exp[k])}`)
+      })
+    return h('ul', { class: 'suff-review' }, rows)
+  }
+
   // ---------- 重做组件 ----------
   // 计时作答 → 判分 → 自动安排下次复习。onRevealed(result) 在提交后调用（用于显示讲解、下一题）。
   function buildRedo(q, { onStart, onRevealed, autoStart = false } = {}) {
@@ -790,32 +881,8 @@
       wrap.appendChild(h('div', { class: 'tutor-input' }, [input, h('button', { class: 'btn btn-primary', onclick: () => finish(input.value.trim()) }, '提交')]))
     }
 
-    // 条件充分性：分三步判断，自动换算成选项，并能指出错在哪一步
     function suffStepper() {
-      const st = { s1: null, s2: null, joint: null }
-      const box = h('div', { class: 'suff-steps' })
-      const out = h('div', { class: 'suff-out' })
-      const submit = h('button', { class: 'btn btn-primary', disabled: '', onclick: () => finish(suffLetter(st), { ...st }) }, '提交')
-      const step = (key, label) => h('div', { class: 'suff-step', 'data-key': key }, [
-        h('div', { class: 'ss-label' }, label),
-        h('div', { class: 'chip-row' }, [['充分', true], ['不充分', false]].map(([t, v]) => h('button', { type: 'button', class: 'chip', onclick: (e) => {
-          st[key] = v
-          $$('.chip', e.currentTarget.parentNode).forEach((x) => x.classList.toggle('active', x === e.currentTarget))
-          refresh()
-        } }, t))),
-      ])
-      const jointStep = step('joint', '③ 两个条件联合起来，能推出结论吗？')
-      box.append(step('s1', '① 只用条件(1)，能推出结论吗？'), step('s2', '② 只用条件(2)，能推出结论吗？'), jointStep)
-      function refresh() {
-        const needJoint = st.s1 === false && st.s2 === false
-        jointStep.hidden = !needJoint
-        if (!needJoint) st.joint = null
-        const letter = st.s1 !== null && st.s2 !== null ? suffLetter(st) : ''
-        out.textContent = letter ? `你的判断对应选项：${letter}` : ''
-        submit.disabled = !letter
-      }
-      refresh()
-      wrap.append(box, out, h('div', { class: 'redo-actions' }, [submit, giveUpBtn()]))
+      wrap.appendChild(suffSteps((letter, st) => finish(letter, st), [giveUpBtn()]))
     }
 
     function giveUpBtn() {
@@ -857,17 +924,8 @@
       wrap.appendChild(h('div', { class: 'redo-result ' + result }, label))
       const info = [`你的答案：${answer || '（未作答）'}`, `正确答案：${q.correct_answer || '（未记录）'}`, `用时 ${fmtDuration(duration)}`]
       wrap.appendChild(h('div', { class: 'redo-info' }, info.join('　·　')))
-      if (detail && SUFF_STEPS[String(q.correct_answer).toUpperCase()]) {
-        const exp = SUFF_STEPS[String(q.correct_answer).toUpperCase()]
-        const yn = (v) => (v ? '充分' : '不充分')
-        const rows = [['条件(1)单独', 's1'], ['条件(2)单独', 's2'], ['联合', 'joint']]
-          .filter(([, k]) => exp[k] !== undefined || detail[k] !== null)
-          .map(([label, k]) => {
-            const ok = exp[k] === detail[k]
-            return h('li', { class: ok ? 'ok' : 'bad' }, `${ok ? '✓' : '✗'} ${label}：你判断${detail[k] === null ? '（未判断）' : yn(detail[k])}，应为${exp[k] === undefined ? '（无需判断）' : yn(exp[k])}`)
-          })
-        wrap.appendChild(h('ul', { class: 'suff-review' }, rows))
-      }
+      const review = suffReview(q.correct_answer, detail)
+      if (review) wrap.appendChild(review)
       wrap.appendChild(h('div', { class: 'redo-info dim' }, `下次复习：${fmtDay(data.review_due_at)}` + (data.mastery === 'mastered' ? '（已连续答对，标记为已掌握）' : '')))
       onRevealed && onRevealed(result)
     }
@@ -1199,6 +1257,209 @@
       }
       view.appendChild(list)
     }
+  }
+
+  // ---------- 题型精讲 ----------
+  const renderInline = (md) => renderMarkdown(md).replace(/^\s*<p>/, '').replace(/<\/p>\s*$/, '')
+  const mdInline = (md, cls = '') => h('span', { class: cls, html: renderInline(md) })
+  const stars = (n) => h('span', { class: 'freq', title: '考频' }, '★'.repeat(n) + '☆'.repeat(3 - n))
+  const TOPIC_STATUS = {
+    new: { label: '未学', cls: 'st-new' },
+    viewed: { label: '看过', cls: 'st-viewed' },
+    practicing: { label: '练习中', cls: 'st-practicing' },
+    done: { label: '已过关', cls: 'st-done' },
+  }
+  const LEVELS = { 1: ['基础', 'lv-1'], 2: ['真题难度', 'lv-2'], 3: ['拔高', 'lv-3'] }
+  const levelBadge = (l) => (LEVELS[l] ? h('span', { class: 'level-badge ' + LEVELS[l][1] }, LEVELS[l][0]) : null)
+  const statusBadge = (t) => h('span', { class: 'topic-status ' + TOPIC_STATUS[t.status].cls }, t.status === 'practicing' ? `练习 ${t.correct}/${t.total}` : TOPIC_STATUS[t.status].label)
+
+  async function renderTopics() {
+    view.appendChild(h('h1', { class: 'page-title' }, '题型精讲'))
+    const loading = h('div', { class: 'loading' }, '加载中…')
+    view.appendChild(loading)
+    const data = await API.req('/api/topics').finally(() => loading.remove())
+    const all = data.modules.flatMap((m) => m.chapters.flatMap((c) => c.topics))
+    const doneCount = all.filter((t) => t.status === 'done').length
+    const next = all.find((t) => t.id === data.next_id)
+
+    view.appendChild(h('div', { class: 'topic-summary' }, [
+      h('div', {}, [h('strong', {}, `${doneCount} / ${all.length}`), ' 个题型已过关']),
+      next ? h('a', { class: 'btn btn-primary', href: '#/topic/' + next.id }, ['继续学习：', mdInline(next.name)]) : null,
+    ]))
+
+    // "卡住了"：按题目里的关键词找题型
+    const search = h('input', { type: 'search', class: 'topic-search', placeholder: '卡住了？输入题目里的关键词，如：绝对值 最小值 / 两根 / 恒成立' })
+    const hint = h('div', { class: 'dim topic-search-hint' }, '每个题型都列了"识别信号"，输入题目里出现的词，帮你找到该往哪里想。')
+    view.append(search, hint)
+
+    const list = h('div')
+    view.appendChild(list)
+    const plain = (s) => String(s).replace(/\\[a-z]+/gi, '').replace(/[${}]/g, '')
+    function draw() {
+      const words = search.value.trim().split(/\s+/).filter(Boolean)
+      const match = (t) => !words.length || words.every((w) => plain([t.name, t.think, t.kp, ...t.signals].join(' ')).includes(w))
+      list.innerHTML = ''
+      let shown = 0
+      for (const m of data.modules) {
+        for (const c of m.chapters) {
+          const topics = c.topics.filter(match)
+          if (!topics.length) continue
+          shown += topics.length
+          const cDone = c.topics.filter((t) => t.status === 'done').length
+          list.appendChild(h('div', { class: 'section-title chapter-title' }, [`${c.name}`, h('span', { class: 'dim' }, `　${cDone}/${c.topics.length}`)]))
+          if (!words.length) list.appendChild(h('div', { class: 'chapter-intro dim' }, c.intro))
+          const box = h('div', { class: 'topic-list' })
+          for (const t of topics) {
+            box.appendChild(h('a', { class: 'topic-row' + (t.id === data.next_id ? ' is-next' : ''), href: '#/topic/' + t.id }, [
+              h('div', { class: 'tr-head' }, [mdInline(t.name, 'tr-name'), stars(t.freq), statusBadge(t)]),
+              h('div', { class: 'tr-think' }, mdInline(t.think)),
+              words.length ? h('div', { class: 'tr-signals dim' }, ['识别信号：', mdInline(t.signals.join('；'))]) : null,
+            ]))
+          }
+          list.appendChild(box)
+        }
+      }
+      if (!shown) list.appendChild(h('div', { class: 'empty' }, [h('div', { class: 'em-text' }, '没找到匹配的题型，换个关键词试试（比如只输入"绝对值"）')]))
+    }
+    let timer = null
+    search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(draw, 200) })
+    draw()
+  }
+
+  async function renderTopic(id) {
+    view.appendChild(h('div', { class: 'loading' }, '加载中…'))
+    const t = await API.req('/api/topics/' + encodeURIComponent(id))
+    view.innerHTML = ''
+
+    view.appendChild(h('div', { class: 'qd-head' }, [
+      h('a', { href: '#/topics', class: 'btn btn-sm' }, '← 题型地图'),
+      h('span', { class: 'badge badge-math' }, `${t.module} · ${t.chapter}`),
+      stars(t.freq),
+      statusBadge(t.progress),
+    ]))
+    view.appendChild(h('h1', { class: 'page-title topic-title' }, mdInline(t.name)))
+
+    // 核心一句话 + 思考路线（遇到题时按顺序问自己）
+    view.appendChild(h('div', { class: 'think-box' }, [h('div', { class: 'tb-label' }, '💡 一句话抓住它'), mdBlock(t.think, 'md-body tb-text')]))
+
+    const sec = (title, body, cls = '') => h('section', { class: 'topic-sec ' + cls }, [h('h2', {}, title), body])
+    view.appendChild(sec('🧭 思考路线：拿到题按顺序问自己', h('ol', { class: 'route-list' }, t.route.map((s) => h('li', {}, [
+      h('div', { class: 'route-q' }, mdInline(s.q)),
+      mdBlock(s.a, 'md-body route-a'),
+    ])))))
+    view.appendChild(sec('🧰 要套的公式和结论', h('ul', { class: 'tool-list' }, t.tools.map((s) => h('li', {}, mdInline(s))))))
+    view.appendChild(sec('👀 看到这些，就是这个题型', h('ul', { class: 'signal-list' }, t.signals.map((s) => h('li', {}, mdInline(s))))))
+    view.appendChild(h('div', { class: 'topic-two' }, [
+      sec('⚡ 秒杀技巧', h('ul', {}, t.tricks.map((s) => h('li', {}, mdInline(s))))),
+      sec('⚠️ 易错点', h('ul', { class: 'trap-list' }, t.traps.map((s) => h('li', {}, mdInline(s))))),
+    ]))
+
+    // 例题：先自己想，再看"思路是怎么来的"，最后看完整解答
+    const exWrap = h('div', { class: 'practice-list' })
+    t.examples.forEach((ex, i) => {
+      const body = h('div', { class: 'ex-solution', hidden: '' }, [
+        h('div', { class: 'ex-think-label' }, '🧠 思路拆解'),
+        h('ol', { class: 'ex-think' }, ex.think.map((s) => h('li', {}, mdInline(s)))),
+        h('div', { class: 'ex-answer' }, `答案：${ex.answer}`),
+        mdBlock(ex.solution),
+        ex.fast ? h('div', { class: 'ex-fast' }, [h('strong', {}, '⚡ 秒杀：'), mdInline(ex.fast)]) : null,
+      ])
+      const btn = h('button', { class: 'btn', onclick: () => { body.hidden = false; btn.remove() } }, '先自己想 2 分钟，再看思路')
+      exWrap.appendChild(h('div', { class: 'problem-card' }, [
+        h('div', { class: 'pc-head' }, [h('span', {}, `例题 ${i + 1}`), levelBadge(ex.level)]),
+        problemStem(ex),
+        btn,
+        body,
+      ]))
+    })
+    view.appendChild(sec('📖 例题：看思路是怎么来的', exWrap))
+
+    // 练一练：由易到难
+    const counts = [1, 2, 3].map((l) => t.practice.filter((p) => p.level === l).length)
+    const practiceWrap = h('div', { class: 'practice-list' })
+    t.practice.forEach((item, i) => practiceWrap.appendChild(buildTopicPractice(t, item, i, t.progress.items[i])))
+    view.appendChild(sec('✍️ 练一练', h('div', {}, [
+      h('div', { class: 'dim practice-note' }, `共 ${t.practice.length} 道：基础 ${counts[0]} · 真题难度 ${counts[1]} · 拔高 ${counts[2]}。做对至少 ${t.practice.length - 1} 道算过关。卡住了先点"给点思路"，别急着看答案。`),
+      practiceWrap,
+    ])))
+
+    view.appendChild(h('div', { class: 'topic-nav' }, [
+      t.prev_id ? h('a', { class: 'btn', href: '#/topic/' + t.prev_id }, '← 上一个题型') : h('span'),
+      t.next_id ? h('a', { class: 'btn btn-primary', href: '#/topic/' + t.next_id }, '下一个题型 →') : h('a', { class: 'btn', href: '#/topics' }, '回到题型地图'),
+    ]))
+  }
+
+  // 题干 + 选项（问题求解列出 A–E；条件充分性附选项含义）
+  function problemStem(item) {
+    const wrap = h('div', {}, [
+      h('div', { class: 'pc-type' }, item.type === 'sc' ? '条件充分性判断' : '问题求解'),
+      mdBlock(item.stem, 'md-body pc-stem'),
+    ])
+    if (item.type === 'ps') {
+      wrap.appendChild(h('div', { class: 'pc-options' }, item.options.map((o, i) => h('div', { class: 'pc-opt' }, [h('strong', {}, LETTERS[i] + '. '), mdInline(o)]))))
+    } else {
+      wrap.appendChild(suffLegend())
+    }
+    return wrap
+  }
+
+  function buildTopicPractice(topic, item, index, lastCorrect) {
+    const card = h('div', { class: 'problem-card' })
+    const started = Date.now()
+    card.appendChild(h('div', { class: 'pc-head' }, [
+      h('span', {}, `练习 ${index + 1}`),
+      levelBadge(item.level),
+      lastCorrect === undefined ? null : h('span', { class: 'badge ' + (lastCorrect ? 'badge-mastery-mastered' : 'badge-error') }, lastCorrect ? '上次做对' : '上次做错'),
+    ]))
+    card.appendChild(problemStem(item))
+    const hintBox = h('div', { class: 'pc-hint', hidden: '' }, [h('strong', {}, '💡 思路：'), mdInline(item.hint)])
+    const hintBtn = h('button', { type: 'button', class: 'btn btn-sm', onclick: () => { hintBox.hidden = false; hintBtn.remove() } }, '💡 给点思路')
+    card.append(hintBtn, hintBox)
+    const area = h('div', { class: 'pc-answer' })
+    card.appendChild(area)
+
+    async function submit(letter, detail) {
+      let res
+      try {
+        res = await API.req(`/api/topics/${topic.id}/practice`, { method: 'POST', body: { index, answer: letter, durationMs: Date.now() - started } })
+      } catch (err) { toast(err.message); return }
+      area.innerHTML = ''
+      area.appendChild(h('div', { class: 'redo-result ' + (res.correct ? 'correct' : 'wrong') }, res.correct ? `✓ 对了！答案 ${res.answer}` : `✗ 你选了 ${letter || '（未作答）'}，正确答案是 ${res.answer}`))
+      const review = item.type === 'sc' ? suffReview(res.answer, detail) : null
+      if (review) area.appendChild(review)
+      area.appendChild(h('div', { class: 'ex-solution' }, mdBlock(res.solution)))
+      const actions = h('div', { class: 'redo-actions' }, [
+        h('button', { class: 'btn btn-sm', onclick: () => { area.innerHTML = ''; drawInput() } }, '再做一次'),
+      ])
+      if (!res.correct) {
+        const addBtn = h('button', { class: 'btn btn-sm btn-primary', onclick: async () => {
+          addBtn.disabled = true
+          try {
+            await API.req(`/api/topics/${topic.id}/wrongbook`, { method: 'POST', body: { index, answer: letter } })
+            addBtn.textContent = '✓ 已加入错题本，明天复习'
+          } catch (err) { toast(err.message); addBtn.disabled = false }
+        } }, '加入错题本')
+        actions.prepend(addBtn)
+      }
+      area.appendChild(actions)
+    }
+
+    function drawInput() {
+      if (item.type === 'sc') {
+        area.appendChild(suffSteps((letter, st) => submit(letter, st)))
+        return
+      }
+      let picked = ''
+      const btn = h('button', { class: 'btn btn-primary', disabled: '', onclick: () => submit(picked) }, '提交')
+      const row = h('div', { class: 'chip-row letter-row big' }, LETTERS.map((L) => h('button', { type: 'button', class: 'chip letter', onclick: (e) => {
+        picked = L
+        $$('.chip', row).forEach((x) => x.classList.toggle('active', x === e.currentTarget))
+        btn.disabled = false
+      } }, L)))
+      area.append(row, h('div', { class: 'redo-actions' }, [btn]))
+    }
+    drawInput()
+    return card
   }
 
   // ---------- 更多（导入导出/设置） ----------

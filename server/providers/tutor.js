@@ -3,7 +3,7 @@
 // OCR provider 与 tutor provider 分离，模型名、端点、能力可独立配置。
 // 真实 Key 仅服务端环境变量；缺 Key 时返回明确错误，不伪造成功结果。
 
-import { SUFFICIENCY_OPTIONS } from '../content/math.js'
+import { SUFFICIENCY_OPTIONS, KNOWLEDGE_TREE, ALL_POINTS } from '../content/math.js'
 
 const TUTOR_TIMEOUT_MS = Number(process.env.TUTOR_TIMEOUT_MS || 120_000)
 // 数学讲解需要稳定推导：默认较低温度；推理模型（如 deepseek-reasoner）需要更大的输出上限
@@ -255,9 +255,9 @@ function buildUserContent(question, userPrompt, imageDataUris, useImage) {
 }
 
 // ---------- 调用 chat/completions ----------
-async function callChat(baseUrl, apiKey, model, messages, { signal } = {}) {
+async function callChat(baseUrl, apiKey, model, messages, { signal, temperature = TUTOR_TEMPERATURE, maxTokens = TUTOR_MAX_TOKENS, timeoutMs = TUTOR_TIMEOUT_MS } = {}) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), TUTOR_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   if (signal) {
     signal.addEventListener('abort', () => controller.abort(), { once: true })
   }
@@ -271,8 +271,8 @@ async function callChat(baseUrl, apiKey, model, messages, { signal } = {}) {
       body: JSON.stringify({
         model,
         messages,
-        temperature: TUTOR_TEMPERATURE,
-        max_tokens: TUTOR_MAX_TOKENS,
+        temperature,
+        max_tokens: maxTokens,
       }),
       signal: controller.signal,
     })
@@ -353,4 +353,76 @@ export async function callTutor(opts) {
     model,
     imagesUsed: wantVision ? 1 : 0,
   }
+}
+
+// ---------- 录题预填：题型 + 知识点 + 参考答案（仅建议） ----------
+// 模型输出只当作建议：题型/知识点走白名单，答案只接受 A–E 且标注未核实，不写入 correct_answer。
+const SUGGEST_TIMEOUT_MS = Number(process.env.SUGGEST_TIMEOUT_MS || 45_000)
+const SUGGEST_TYPES = ['problem_solving', 'sufficient_condition']
+const POINT_SET = new Set(ALL_POINTS)
+
+function buildSuggestPrompt() {
+  return [
+    '你是 199 管理类联考数学的录题助手。根据题干判断题型和考查的知识点，只输出一个 JSON 对象，不要输出其他任何文字或 Markdown 代码块。',
+    'JSON 格式：{"question_type": "problem_solving" | "sufficient_condition", "knowledge_points": ["..."], "answer": "A"-"E" 或 ""}',
+    '规则：',
+    '1. question_type：题干给出"条件(1)""条件(2)"并要求判断能否推出结论的，是 sufficient_condition（条件充分性判断）；其余为 problem_solving（问题求解）。',
+    '2. knowledge_points：1–3 个，按相关度从高到低，必须逐字取自下面的知识点列表，不得自造或改写：',
+    ...KNOWLEDGE_TREE.map((m) => `- ${m.module}：${m.points.join('、')}`),
+    '3. answer：只有在你能可靠推出时填写选项字母，没把握就填空字符串 ""，不要猜。',
+  ].join('\n')
+}
+
+// 从模型输出中取出 JSON 并做白名单校验；无法解析返回 null。
+export function parseSuggestion(text) {
+  if (typeof text !== 'string') return null
+  let body = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  const start = body.indexOf('{')
+  const end = body.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  let raw
+  try {
+    raw = JSON.parse(body.slice(start, end + 1))
+  } catch {
+    return null
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+
+  const questionType = SUGGEST_TYPES.includes(raw.question_type) ? raw.question_type : ''
+  const kps = Array.isArray(raw.knowledge_points) ? raw.knowledge_points : []
+  const knowledgePoints = [...new Set(kps.map((k) => String(k).trim()).filter((k) => POINT_SET.has(k)))].slice(0, 3)
+  const answer = String(raw.answer ?? '').trim().toUpperCase()
+
+  return {
+    question_type: questionType,
+    knowledge_points: knowledgePoints,
+    answer: /^[A-E]$/.test(answer) ? answer : '',
+  }
+}
+
+// opts: { stem, signal }
+export async function suggestQuestionMeta({ stem, signal } = {}) {
+  if (!isTutorAvailable()) {
+    return { error: '服务端未配置 AI 老师 API Key', status: 503 }
+  }
+  const messages = [
+    { role: 'system', content: buildSuggestPrompt() },
+    { role: 'user', content: `题干：\n${stem}` },
+  ]
+  const started = Date.now()
+  const result = await callChat(ACTIVE.baseUrl, ACTIVE.apiKey, ACTIVE.model, messages, {
+    signal,
+    temperature: 0,
+    timeoutMs: SUGGEST_TIMEOUT_MS,
+  })
+  const elapsedMs = Date.now() - started
+  const base = { elapsedMs, provider: ACTIVE.provider, model: ACTIVE.model }
+  if (result.error) return { ...result, ...base }
+
+  const parsed = parseSuggestion(result.markdown)
+  if (!parsed) {
+    console.error(`[tutor] suggest 无法解析: ${result.markdown.slice(0, 300)}`)
+    return { error: 'AI 返回格式无法解析', status: 502, ...base }
+  }
+  return { ...parsed, tokens: result.tokens, ...base }
 }

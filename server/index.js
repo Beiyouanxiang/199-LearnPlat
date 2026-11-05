@@ -35,7 +35,11 @@ import db, {
   getActivity,
   listCardReviews,
   gradeCard,
+  markTopicViewed,
+  saveTopicAttempt,
+  getTopicProgress,
 } from './db.js'
+import { TOPIC_MODULES, TOPIC_LIST, TOPIC_MAP } from './content/topics/index.js'
 import {
   KNOWLEDGE_TREE,
   FORMULA_CARDS,
@@ -65,6 +69,7 @@ import {
   isVisionAvailable,
   getTutorInfo,
   callTutor,
+  suggestQuestionMeta,
 } from './providers/tutor.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -195,6 +200,11 @@ const tutorRateLimit = makeRateLimit(
   Number(process.env.RATE_MAX_TUTOR || 20),
   (req) => String(req.userId || req.ip || 'unknown')
 )
+const suggestRateLimit = makeRateLimit(
+  10 * 60 * 1000,
+  Number(process.env.RATE_MAX_SUGGEST || 30),
+  (req) => String(req.userId || req.ip || 'unknown')
+)
 
 // ---------- vendor 静态文件 ----------
 function serveFromNodeModules(routePath, pkgPath) {
@@ -323,6 +333,29 @@ app.post('/api/ocr', requireAuth, ocrRateLimit, async (req, res) => {
     markdown: result.markdown,
     layout: result.layout,
     usage: result.usage,
+    elapsedMs: result.elapsedMs,
+  })
+})
+
+// ---------- 录题预填建议（题型 / 知识点 / 参考答案，仅供确认）----------
+app.post('/api/suggest', requireAuth, suggestRateLimit, async (req, res) => {
+  if (!isTutorAvailable()) {
+    return res.status(503).json({ error: '服务端未配置 AI 老师 API Key' })
+  }
+  const stem = String(req.body?.stem || '').trim().slice(0, 4000)
+  if (!stem) return res.status(400).json({ error: '缺少题干' })
+
+  const result = await suggestQuestionMeta({ stem })
+  if (result.error) {
+    return res.status(result.status || 502).json({ error: result.error })
+  }
+  res.json({
+    question_type: result.question_type,
+    knowledge_points: result.knowledge_points,
+    answer: result.answer,
+    answer_verified: false,
+    provider: result.provider,
+    model: result.model,
     elapsedMs: result.elapsedMs,
   })
 })
@@ -653,6 +686,7 @@ app.get('/api/knowledge', requireAuth, (req, res) => {
     tree: KNOWLEDGE_TREE,
     stats,
     sufficiency_options: SUFFICIENCY_OPTIONS,
+    suggest: isTutorAvailable(),
   })
 })
 
@@ -694,6 +728,106 @@ app.post('/api/cards/:key/grade', requireAuth, (req, res) => {
   res.json(gradeCard(req.userId, key, grade))
 })
 
+// ---------- 题型讲解 ----------
+// 进度汇总：status = new（没看过）| viewed（看过没练）| practicing（练过但没过关）| done（全部做过，最近一次至多错 1 道）
+function topicStatus(topic, prog) {
+  const items = prog?.items || {}
+  const done = Object.keys(items).length
+  const correct = Object.values(items).filter(Boolean).length
+  const total = topic.practice.length
+  let status = 'new'
+  if (done === total && correct >= total - 1) status = 'done'
+  else if (done) status = 'practicing'
+  else if (prog?.viewed_at) status = 'viewed'
+  return { status, done, correct, total }
+}
+
+function nextTopic(progress) {
+  return TOPIC_LIST.find((t) => topicStatus(t, progress[t.id]).status !== 'done') || null
+}
+
+// 练习题对前端隐藏答案与解析（思路提示 hint 可以先给），作答后由服务端判分并返回
+const publicItem = ({ answer, solution, swapped, ...rest }) => rest
+
+app.get('/api/topics', requireAuth, (req, res) => {
+  const progress = getTopicProgress(req.userId)
+  const next = nextTopic(progress)
+  res.json({
+    next_id: next?.id || '',
+    modules: TOPIC_MODULES.map((m) => ({
+      id: m.id,
+      name: m.name,
+      chapters: m.chapters.map((c) => ({
+        id: c.id,
+        name: c.name,
+        intro: c.intro,
+        topics: c.topics.map((t) => ({
+          id: t.id,
+          name: t.name,
+          freq: t.freq,
+          think: t.think,
+          signals: t.signals,
+          kp: t.kp,
+          ...topicStatus(t, progress[t.id]),
+        })),
+      })),
+    })),
+  })
+})
+
+app.get('/api/topics/:id', requireAuth, (req, res) => {
+  const t = TOPIC_MAP[req.params.id]
+  if (!t) return res.status(404).json({ error: '题型不存在' })
+  markTopicViewed(req.userId, t.id)
+  const progress = getTopicProgress(req.userId)
+  res.json({
+    ...t,
+    practice: t.practice.map(publicItem),
+    progress: { ...topicStatus(t, progress[t.id]), items: progress[t.id]?.items || {} },
+    prev_id: TOPIC_LIST[t.order - 1]?.id || '',
+    next_id: TOPIC_LIST[t.order + 1]?.id || '',
+  })
+})
+
+app.post('/api/topics/:id/practice', requireAuth, (req, res) => {
+  const t = TOPIC_MAP[req.params.id]
+  const index = Number(req.body?.index)
+  const item = t?.practice[index]
+  if (!item) return res.status(404).json({ error: '题目不存在' })
+  const answer = String(req.body?.answer || '').toUpperCase().slice(0, 1)
+  const correct = answer === item.answer
+  saveTopicAttempt(req.userId, t.id, {
+    index,
+    answer,
+    correct,
+    duration_ms: Math.min(Math.max(Number(req.body?.durationMs) || 0, 0), 3600000),
+  })
+  res.json({ correct, answer: item.answer, solution: item.solution })
+})
+
+// 练习做错了：存进错题本，带上题型和知识点，进入间隔复习
+app.post('/api/topics/:id/wrongbook', requireAuth, (req, res) => {
+  const t = TOPIC_MAP[req.params.id]
+  const index = Number(req.body?.index)
+  const item = t?.practice[index]
+  if (!item) return res.status(404).json({ error: '题目不存在' })
+  const optionsMd = item.type === 'ps' ? '\n\n' + item.options.map((o, i) => `${'ABCDE'[i]}. ${o}`).join('　') : ''
+  const q = createQuestion(req.userId, {
+    subject: 'math',
+    question_type: item.type === 'sc' ? 'sufficient_condition' : 'problem_solving',
+    title: `${t.name} · 练习 ${index + 1}`,
+    stem: item.stem + optionsMd,
+    stem_raw: '',
+    correct_answer: item.answer,
+    user_answer: String(req.body?.answer || '').slice(0, 10),
+    source: `题型练习：${t.name}`,
+    knowledge_points: [t.kp],
+    tags: ['题型练习'],
+    error_reason_note: '',
+  })
+  res.json({ id: q.id })
+})
+
 app.get('/api/today', requireAuth, (req, res) => {
   const stats = getStats(req.userId)
   const cards = dueCards(req.userId)
@@ -705,7 +839,13 @@ app.get('/api/today', requireAuth, (req, res) => {
     .filter((s) => s.unmastered > 0)
     .sort((a, b) => b.last_wrong - a.last_wrong || b.unmastered - a.unmastered)
     .slice(0, 5)
+  const topicProgress = getTopicProgress(req.userId)
+  const next = nextTopic(topicProgress)
+  const topicsDone = TOPIC_LIST.filter((t) => topicStatus(t, topicProgress[t.id]).status === 'done').length
   res.json({
+    next_topic: next ? { id: next.id, name: next.name, chapter: next.chapter, think: next.think, ...topicStatus(next, topicProgress[next.id]) } : null,
+    topics_done: topicsDone,
+    topics_total: TOPIC_LIST.length,
     review_due: stats.review_due,
     untidy: stats.untidy,
     total: stats.total,

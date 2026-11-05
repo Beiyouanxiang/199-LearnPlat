@@ -135,10 +135,22 @@ db.exec(`
 // ---------- 迁移：冲刺版新增列与表 ----------
 function addColumnIfMissing(table, column, ddl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name)
-  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+  if (cols.includes(column)) return false
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+  return true
 }
 // review_stage：连续答对的间隔复习阶段，答错归零
-addColumnIfMissing('questions', 'review_stage', 'INTEGER DEFAULT 0')
+if (addColumnIfMissing('questions', 'review_stage', 'INTEGER DEFAULT 0')) {
+  // 旧版升级（只执行一次）：旧版不排复习日期，未掌握的题 review_due_at 都是 0，会进不了复习队列。
+  // 按题目 id 分摊到今天起的 7 天里，避免第一天堆积。
+  const DAY = 86400000
+  const TZ = 8 * 3600000
+  const todayStart = Math.floor((Date.now() + TZ) / DAY) * DAY - TZ
+  db.prepare(
+    `UPDATE questions SET review_due_at = ? + (id % 7) * ?
+     WHERE review_due_at = 0 AND mastery != 'mastered'`
+  ).run(todayStart, DAY)
+}
 // detail：条件充分性分步作答等结构化信息（JSON）
 addColumnIfMissing('redo_records', 'detail', "TEXT DEFAULT ''")
 
@@ -152,6 +164,30 @@ db.exec(`
     reviewed_at INTEGER DEFAULT 0,
     review_count INTEGER DEFAULT 0,
     PRIMARY KEY (user_id, card_key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+`)
+
+// 题型讲解：每次练习作答一条记录，进度由此汇总
+db.exec(`
+  CREATE TABLE IF NOT EXISTS topic_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    topic_id TEXT NOT NULL,
+    item_index INTEGER NOT NULL,
+    answer TEXT DEFAULT '',
+    correct INTEGER DEFAULT 0,
+    duration_ms INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_topic_attempts_user ON topic_attempts(user_id, topic_id);
+  CREATE TABLE IF NOT EXISTS topic_views (
+    user_id INTEGER NOT NULL,
+    topic_id TEXT NOT NULL,
+    first_viewed_at INTEGER NOT NULL,
+    last_viewed_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, topic_id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 `)
@@ -872,6 +908,40 @@ export function getStats(userId) {
     by_mastery: Object.fromEntries(byMastery.map((r) => [r.mastery, r.c])),
     review_due: reviewDue,
   }
+}
+
+// ---------- 题型讲解进度 ----------
+export function markTopicViewed(userId, topicId) {
+  const now = Date.now()
+  db.prepare(
+    `INSERT INTO topic_views (user_id, topic_id, first_viewed_at, last_viewed_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(user_id, topic_id) DO UPDATE SET last_viewed_at = excluded.last_viewed_at`
+  ).run(userId, topicId, now, now)
+}
+
+export function saveTopicAttempt(userId, topicId, rec) {
+  db.prepare(
+    `INSERT INTO topic_attempts (user_id, topic_id, item_index, answer, correct, duration_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(userId, topicId, rec.index, rec.answer || '', rec.correct ? 1 : 0, rec.duration_ms || 0, Date.now())
+}
+
+// 每个题型：是否看过、每道练习最近一次是否答对
+export function getTopicProgress(userId) {
+  const views = db.prepare('SELECT topic_id, last_viewed_at FROM topic_views WHERE user_id = ?').all(userId)
+  const latest = db
+    .prepare(
+      `SELECT topic_id, item_index, correct FROM topic_attempts a
+       WHERE user_id = ? AND id = (SELECT MAX(id) FROM topic_attempts b
+         WHERE b.user_id = a.user_id AND b.topic_id = a.topic_id AND b.item_index = a.item_index)`
+    )
+    .all(userId)
+  const map = {}
+  for (const v of views) map[v.topic_id] = { viewed_at: v.last_viewed_at, items: {} }
+  for (const r of latest) {
+    ;(map[r.topic_id] ||= { viewed_at: 0, items: {} }).items[r.item_index] = !!r.correct
+  }
+  return map
 }
 
 export default db
