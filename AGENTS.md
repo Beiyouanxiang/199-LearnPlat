@@ -35,3 +35,10 @@ npm start                             # 本地 http://127.0.0.1:3005 实际点�
 
 ## 当前规划
 见 `docs/PLAN-batch-and-essay.md`（批量上传错题、作文批改），给代理的任务提示词在 `docs/codex-prompts.md`。
+
+## 用户确认的交互约束（2026-11-05）
+- 无 GPT/Claude API Key 的场景必须正式可用，作文优先实现导出/导入与官方 Codex/Claude Code 主动调用平台 REST/MCP 的路径。
+- 平台令牌与模型密钥严格区分；不将会员凭证转作网站后端模型 API。
+- 无 OCR Key 时保留手动转写与校对，不能阻断外部批改。
+- 当前授权仅 GitHub 功能分支及 PR，不更新阿里云网站。
+- 详细验收以 docs/PLAN-batch-and-essay.md 的 2026-11-05 补充为准。
