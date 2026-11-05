@@ -5,6 +5,8 @@ import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import express from 'express'
+import { installBatch } from './batch.js'
+import { installJobRoutes, startJobs } from './jobs.js'
 
 import db, {
   createUser,
@@ -947,6 +949,9 @@ app.post('/api/import', requireAuth, async (req, res) => {
   res.json({ ok: true, imported })
 })
 
+installJobRoutes(app, requireAuth, ocrRateLimit)
+installBatch(app, requireAuth, ocrRateLimit, withAccessUrl)
+
 // ---------- 404 / 错误 ----------
 app.use((req, res) => {
   res.status(404).json({ error: 'Not Found' })
@@ -962,6 +967,7 @@ app.use((err, req, res, next) => {
 
 // ---------- 启动 ----------
 if (NODE_ENV !== 'test') {
+  startJobs()
   app.listen(PORT, HOST, () => {
     console.log(`[exam199] listening on http://${HOST}:${PORT} (env=${NODE_ENV})`)
     console.log(`[exam199] ocr=${isOcrAvailable() ? 'on' : 'off'} tutor=${isTutorAvailable() ? 'on' : 'off'} vision=${isVisionAvailable() ? 'on' : 'off'}`)

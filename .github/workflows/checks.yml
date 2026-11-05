@@ -1,0 +1,22 @@
+name: Learning platform checks
+on:
+  push:
+    branches: ['feat/**']
+  pull_request:
+    branches: [sprint/math-review, feat/batch-upload]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: node --check server/index.js && node --check public/app.js
+      - run: node --test tests/*.test.mjs
+        env:
+          REQUIRE_MIGRATION: '1'

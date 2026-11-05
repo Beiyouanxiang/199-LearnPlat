@@ -410,3 +410,5 @@ a { color: inherit; text-decoration: none; }
   .topic-two { grid-template-columns: 1fr; }
   .think-box .tb-text { font-size: 15px; }
 }
+
+.batch-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin-top:16px}.batch-thumb{width:100%;max-height:160px;object-fit:contain}.review-columns{display:grid;grid-template-columns:1fr 1fr;gap:16px}.review-image{width:100%;height:auto}.review-columns textarea{width:100%;box-sizing:border-box}.review-columns>*{min-width:0}.error{color:#b42318}@media(max-width:700px){.review-columns{grid-template-columns:1fr}.review-image{max-height:45vh;object-fit:contain}}
