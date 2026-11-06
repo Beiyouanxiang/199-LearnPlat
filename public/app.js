@@ -219,6 +219,7 @@
   }
 
   async function enterApp(user) {
+    batchOwner = user.id
     authScreen.hidden = true
     appEl.hidden = false
     $('#user-name').textContent = user.username
@@ -253,6 +254,8 @@
     const map = {
       home: renderHome,
       capture: renderCapture,
+      batch: renderBatch,
+      'review-ocr': renderReviewOcr,
       list: renderList,
       review: renderSession,
       cards: renderCards,
@@ -269,6 +272,7 @@
 
   // ---------- 首页：今日任务 ----------
   async function renderHome() {
+    view.append(h('div', {class:'filter-bar'}, [h('a',{class:'btn',href:'#/batch'},'批量上传'),h('a',{class:'btn',href:'#/review-ocr'},'待校对')]))
     view.appendChild(h('h1', { class: 'page-title' }, '今日任务'))
     const loading = h('div', { class: 'loading' }, '加载中…')
     view.appendChild(loading)
@@ -490,6 +494,7 @@
   // ---------- 录题 ----------
   async function renderCapture() {
     view.appendChild(h('h1', { class: 'page-title' }, '录题'))
+    view.append(h('a',{class:'btn',href:'#/batch'},'多题批量上传'))
     const images = [] // { dataUri, mime }
 
     const card = h('div', { class: 'card' })
@@ -1507,6 +1512,149 @@
     info.appendChild(h('div', { class: 'section-title', style: 'margin-top:0' }, '关于 199 管理类联考综合能力'))
     info.appendChild(h('div', { html: '<p>满分 200 分 / 180 分钟。数学 75 分（问题求解 15 题 + 条件充分性判断 10 题，每题 3 分）；逻辑 60 分（30 题，每题 2 分）；写作 65 分（论证有效性分析 30 分 + 论说文 35 分）。</p><p class="dim" style="font-size:13px">以当年官方大纲为准，详见 docs/EXAM-199-INFO.md</p>' }))
     view.appendChild(info)
+  }
+
+
+  // ---------- 批量上传与校对 ----------
+  let batchOwner = 0
+  function draftDB() {
+    return new Promise((resolve,reject)=>{
+      const r=indexedDB.open('learnplat-batch',1)
+      r.onupgradeneeded=()=>r.result.createObjectStore('drafts')
+      r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)
+    })
+  }
+  async function draftStorage(value) {
+    const db=await draftDB()
+    try{return await new Promise((resolve,reject)=>{
+      const tx=db.transaction('drafts',value===undefined?'readonly':'readwrite'), s=tx.objectStore('drafts')
+      const r=value===undefined?s.get(batchOwner):s.put(value,batchOwner)
+      tx.oncomplete=()=>resolve(r.result);tx.onerror=()=>reject(tx.error)
+    })}finally{db.close()}
+  }
+  async function preprocessImage(file) {
+    if(!file.type.startsWith('image/'))throw new Error('请选择图片')
+    // 浏览器解码阶段应用 EXIF 方向，不再重复旋转。
+    const bitmap=await createImageBitmap(file,{imageOrientation:'from-image'})
+    try{
+      const scale=Math.min(1,2000/Math.max(bitmap.width,bitmap.height))
+      const c=document.createElement('canvas');c.width=Math.max(1,Math.round(bitmap.width*scale));c.height=Math.max(1,Math.round(bitmap.height*scale))
+      c.getContext('2d').drawImage(bitmap,0,0,c.width,c.height)
+      const blob=await new Promise(resolve=>c.toBlob(resolve,'image/jpeg',0.85))
+      if(!blob)throw new Error('图片压缩失败')
+      const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer()))].map(n=>n.toString(16).padStart(2,'0')).join('')
+      return {dataUri:await fileToDataUri(blob),hash}
+    }finally{bitmap.close()}
+  }
+  async function renderBatch() {
+    let draft=await draftStorage()||{batch:crypto.randomUUID(),groups:[],subject:'math',source:'',tags:''}
+    let busy=false, preparing=false, gone=false
+    onLeave(()=>{gone=true})
+    const box=h('div'),grid=h('div',{class:'batch-grid'}),status=h('p',{role:'status'})
+    const subject=h('select',{},SUBJECTS.map(s=>h('option',{value:s.key},s.label)));subject.value=draft.subject
+    const source=h('input',{placeholder:'来源，例如 2024 真题',value:draft.source})
+    const tags=h('input',{placeholder:'标签，用逗号分隔',value:draft.tags})
+    const picker=h('input',{type:'file',accept:'image/*',multiple:true})
+    const save=async()=>{draft.subject=subject.value;draft.source=source.value;draft.tags=tags.value;await draftStorage(draft)}
+    const draw=()=>{
+      grid.replaceChildren()
+      draft.groups.forEach((g,i)=>{
+        const controls=h('div',{class:'filter-bar'})
+        const button=(label,action)=>h('button',{class:'btn btn-sm',disabled:busy||g.qid,onclick:async()=>{action();await save();draw()}},label)
+        controls.append(button('删除',()=>draft.groups.splice(i,1)),button('上移',()=>{if(i&&!draft.groups[i-1].qid)[draft.groups[i-1],draft.groups[i]]=[g,draft.groups[i-1]]}),
+          button('合并下一题',()=>{const n=draft.groups[i+1];if(n&&!n.qid&&g.images.length+n.images.length<=20){g.images.push(...n.images);draft.groups.splice(i+1,1)}}))
+        grid.append(h('div',{class:'card'},[h('strong',{},'第 '+(i+1)+' 题 · '+g.images.length+' 张'),
+          ...g.images.map(im=>h('img',{src:im.dataUri,alt:'待上传题图',class:'batch-thumb'})),controls,
+          h('p',{class:g.error?'error':'dim'},g.error|| (g.done?'已上传并入队':g.qid?'已建题，可续传':'待上传'))]))
+      })
+      status.textContent='共 '+draft.groups.length+' 题，预计 OCR '+draft.groups.reduce((n,g)=>n+g.images.length,0)+' 次；重试可能增加调用次数。'
+    }
+    async function add(files){
+      if(busy||preparing)return
+      preparing=true;picker.disabled=true
+      try{
+        for(const f of files){
+          if(draft.groups.length>=100)throw new Error('每批最多100题')
+          const im=await preprocessImage(f)
+          const known=draft.groups.some(g=>g.images.some(x=>x.hash===im.hash))
+          const remote=await API.req('/api/batch/duplicates',{method:'POST',body:{hashes:[im.hash]}})
+          if((known||remote.hashes.length)&&!confirm('这张图片已上传或已选中，仍然添加？'))continue
+          draft.groups.push({key:crypto.randomUUID(),images:[im]});await save();draw()
+        }
+      }catch(e){toast(e.message)}finally{preparing=false;picker.disabled=false}
+    }
+    picker.onchange=()=>{add([...picker.files]);picker.value=''}
+    const zone=h('div',{class:'capture-zone',ondragover:e=>e.preventDefault(),ondrop:e=>{e.preventDefault();add([...e.dataTransfer.files])}},['选择、拖拽或粘贴多张图片',picker])
+    pasteHandler=e=>{const fs=[...e.clipboardData.files];if(fs.length){e.preventDefault();add(fs)}}
+    const upload=h('button',{class:'btn btn-primary',onclick:async()=>{
+      if(busy||preparing)return
+      busy=true;upload.disabled=true;picker.disabled=true;subject.disabled=true;source.disabled=true;tags.disabled=true
+      await save();draw()
+      const unload=e=>{e.preventDefault();e.returnValue='图片尚在上传'}
+      window.addEventListener('beforeunload',unload)
+      let cursor=0
+      const worker=async()=>{while(cursor<draft.groups.length){
+        const g=draft.groups[cursor++];if(g.done)continue
+        try{
+          g.error=''
+          if(!g.qid){const q=await API.req('/api/batch/questions',{method:'POST',body:{request_id:g.key,batch:draft.batch,count:g.images.length,subject:draft.subject,source:draft.source,tags:draft.tags.split(/[,，]/).map(s=>s.trim()).filter(Boolean)}});g.qid=q.question_id;await save()}
+          for(let i=0;i<g.images.length;i++)await API.req('/api/batch/questions/'+g.qid+'/images',{method:'POST',body:{position:i,image:g.images[i].dataUri}})
+          const j=await API.req('/api/questions/'+g.qid+'/ocr',{method:'POST',body:{}})
+          g.done=true;g.job=j.id
+        }catch(e){g.error=e.message}
+        await save();if(!gone)draw()
+      }}
+      try{await Promise.all([worker(),worker(),worker()])}
+      finally{busy=false;window.removeEventListener('beforeunload',unload);upload.disabled=false;picker.disabled=false;if(!gone)draw()}
+      toast('上传结束。已入队任务在后台继续；失败项可点击继续上传。')
+    }},'上传 / 继续失败项')
+    box.append(h('h1',{},'批量上传'),h('p',{},'图片保存在本机草稿中，可刷新后继续。上传完成后即可离开，后台继续识别。'),
+      h('div',{class:'filter-bar'},[subject,source,tags]),zone,status,upload,
+      h('a',{class:'btn',href:'#/review-ocr'},'去校对'),
+      h('button',{class:'btn',onclick:async()=>{if(busy||preparing)return;if(draft.groups.some(g=>!g.done)&&!confirm('清除本机草稿？已上传到服务器的题目仍然保留。'))return;draft={batch:crypto.randomUUID(),groups:[],subject:subject.value,source:source.value,tags:tags.value};await save();draw()}},'开始新批次'),grid)
+    view.append(box);draw()
+  }
+  async function renderReviewOcr() {
+    let rows=[],selected=0,dirty=false,gone=false
+    const select=h('select'),images=h('div'),text=h('textarea',{rows:16,placeholder:'识别结果；也可手动填写'}),preview=h('div'),message=h('p'),kp=h('div')
+    const drawText=()=>{preview.innerHTML=renderMarkdown(text.value)}
+    text.oninput=()=>{dirty=true;drawText()}
+    function pick(id){
+      const q=rows.find(r=>r.id===id);if(!q)return
+      selected=q.id;select.value=String(q.id);dirty=false;text.value=q.stem_raw||'';drawText()
+      images.replaceChildren(...q.images.map(im=>h('img',{src:im.access_url,alt:'题目原图',class:'review-image'})))
+      kp.replaceChildren();let result={};try{result=JSON.parse(q.job?.result||'{}')}catch{}
+      for(const k of result.suggestion?.knowledge_points||[])kp.append(h('label',{},[h('input',{type:'checkbox',value:k}),' '+k+' ']))
+      message.textContent=q.job?.error||q.job?.status||'图片未完整上传，可返回批量上传继续'
+      retry.disabled=q.job?.status!=='failed'
+    }
+    select.onchange=()=>{if(dirty&&!confirm('放弃当前未保存校对？')){select.value=String(selected);return}pick(Number(select.value))}
+    const save=h('button',{class:'btn btn-primary',onclick:async()=>{
+      try{
+        await API.req('/api/batch/questions/'+selected+'/confirm',{method:'POST',body:{stem:text.value,knowledge_points:[...kp.querySelectorAll('input:checked')].map(x=>x.value)}})
+        dirty=false;selected=0;await refresh();toast('已保存并安排复习')
+      }catch(e){toast(e.message)}
+    }},'保存并下一题（Ctrl+Enter）')
+    const retry=h('button',{class:'btn',onclick:async()=>{
+      try{const q=rows.find(r=>r.id===selected);await API.req('/api/jobs/'+q.job.id+'/retry',{method:'POST',body:{}});await refresh()}catch(e){toast(e.message)}
+    }},'重试识别')
+    async function refresh(){
+      const r=await API.req('/api/batch/review');if(gone)return
+      const old=rows.find(x=>x.id===selected);rows=r.items
+      select.replaceChildren(...rows.map(q=>h('option',{value:q.id},'#'+q.id+' · '+(q.job?.status||'待上传'))))
+      if(!rows.length){selected=0;text.value='';images.replaceChildren();preview.replaceChildren();message.textContent='全部校对完成';save.disabled=true;retry.disabled=true;return}
+      save.disabled=false
+      const current=rows.find(x=>x.id===selected)
+      if(!current)pick(rows[0].id)
+      else if(!dirty&&(current.stem_raw!==old?.stem_raw||current.job?.result!==old?.job?.result))pick(selected)
+      else{select.value=String(selected);message.textContent=current.job?.error||current.job?.status||'待上传';retry.disabled=current.job?.status!=='failed'}
+    }
+    const key=e=>{if(e.ctrlKey&&e.key==='Enter'){e.preventDefault();save.click()}if(e.ctrlKey&&e.key==='ArrowRight'){e.preventDefault();if(!dirty||confirm('跳过并放弃未保存校对？')){const i=rows.findIndex(q=>q.id===selected);pick(rows[(i+1)%rows.length]?.id)}}}
+    document.addEventListener('keydown',key)
+    const timer=setInterval(()=>refresh().catch(()=>{}),3000)
+    onLeave(()=>{gone=true;clearInterval(timer);document.removeEventListener('keydown',key)})
+    view.append(h('h1',{},'待校对'),select,message,h('div',{class:'review-columns'},[images,h('div',{},[text,preview,kp])]),save,retry)
+    await refresh()
   }
 
   // ---------- 启动 ----------

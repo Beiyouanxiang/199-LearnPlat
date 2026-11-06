@@ -6,8 +6,8 @@ import Database from 'better-sqlite3'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
-const DATA_DIR = path.join(ROOT, 'data')
-const UPLOAD_DIR = path.join(ROOT, 'uploads')
+const DATA_DIR = process.env.LEARNPLAT_DATA_DIR || path.join(ROOT, 'data')
+const UPLOAD_DIR = process.env.LEARNPLAT_UPLOAD_DIR || path.join(ROOT, 'uploads')
 const DB_FILE = path.join(DATA_DIR, 'exam199.db')
 
 // ---------- 文件权限 ----------

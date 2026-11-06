@@ -8,7 +8,7 @@ const GLM_OCR_MODEL = process.env.GLM_OCR_MODEL || 'glm-ocr'
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120_000)
 
 export function isOcrAvailable() {
-  return !!GLM_API_KEY
+  return !!GLM_API_KEY || process.env.OCR_MOCK === '1'
 }
 
 export function getOcrInfo() {
@@ -92,13 +92,13 @@ export function deriveTitle(markdown) {
 
 // ---------- 调用智谱 GLM-OCR ----------
 // imageDataUri: string | string[]（数组=多图：端点只收单 string，逐张调用后拼接）
-export async function callOcr(imageDataUri, { signal } = {}) {
+export async function callOcr(imageDataUri, { signal, beforeCall } = {}) {
   if (Array.isArray(imageDataUri)) {
     const parts = []
     let totalUsage = null
     let totalMs = 0
     for (let i = 0; i < imageDataUri.length; i++) {
-      const r = await callOcr(imageDataUri[i], { signal })
+      const r = await callOcr(imageDataUri[i], { signal, beforeCall })
       if (r.error) return r
       if (r.markdown) parts.push(r.markdown)
       if (r.usage) {
@@ -116,10 +116,13 @@ export async function callOcr(imageDataUri, { signal } = {}) {
       elapsedMs: totalMs,
     }
   }
+  beforeCall?.()
   return callOcrSingle(imageDataUri, { signal })
 }
 
 async function callOcrSingle(imageDataUri, { signal } = {}) {
+  if (process.env.OCR_MOCK === '1') return { markdown: '【模拟识别】求解 $x+1=2$。', elapsedMs: 0 }
+
   if (!GLM_API_KEY) {
     return { error: '服务端未配置 GLM_API_KEY', status: 503 }
   }
@@ -151,6 +154,7 @@ async function callOcrSingle(imageDataUri, { signal } = {}) {
       console.error(`[ocr] GLM 返回 ${upstream.status}: ${text.slice(0, 500)}`)
       return {
         error: `识别服务返回错误（${upstream.status}）`,
+        upstreamStatus: upstream.status,
         detail: upstream.status === 429 ? '接口限流，请稍后重试' : undefined,
         status: 502,
       }
