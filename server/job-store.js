@@ -54,7 +54,7 @@ export function createJobStore(db) {
       const day=new Date(Date.now()+8*3600000).toISOString().slice(0,10)
       db.prepare('INSERT OR IGNORE INTO daily_usage(user_id,day,kind) VALUES(?,?,?)').run(user,day,kind)
       const r=db.prepare('UPDATE daily_usage SET calls=calls+1 WHERE user_id=? AND day=? AND kind=? AND calls<?').run(user,day,kind,max)
-      if(!r.changes) throw Object.assign(new Error('今日调用额度已用完，请明天重试'),{retryable:false})
+      if(!r.changes) throw Object.assign(new Error('今日调用额度已用完，请明天重试'),{retryable:false,code:'DAILY_LIMIT'})
     },
   }
 }

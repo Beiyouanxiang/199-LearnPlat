@@ -92,13 +92,13 @@ export function deriveTitle(markdown) {
 
 // ---------- 调用智谱 GLM-OCR ----------
 // imageDataUri: string | string[]（数组=多图：端点只收单 string，逐张调用后拼接）
-export async function callOcr(imageDataUri, { signal } = {}) {
+export async function callOcr(imageDataUri, { signal, beforeCall } = {}) {
   if (Array.isArray(imageDataUri)) {
     const parts = []
     let totalUsage = null
     let totalMs = 0
     for (let i = 0; i < imageDataUri.length; i++) {
-      const r = await callOcr(imageDataUri[i], { signal })
+      const r = await callOcr(imageDataUri[i], { signal, beforeCall })
       if (r.error) return r
       if (r.markdown) parts.push(r.markdown)
       if (r.usage) {
@@ -116,6 +116,7 @@ export async function callOcr(imageDataUri, { signal } = {}) {
       elapsedMs: totalMs,
     }
   }
+  beforeCall?.()
   return callOcrSingle(imageDataUri, { signal })
 }
 

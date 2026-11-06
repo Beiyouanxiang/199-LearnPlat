@@ -1649,7 +1649,7 @@
       save.disabled=false
       const current=rows.find(x=>x.id===selected)
       if(!current)pick(rows[0].id)
-      else if(!dirty&&current.stem_raw!==old?.stem_raw)pick(selected)
+      else if(!dirty&&(current.stem_raw!==old?.stem_raw||current.job?.result!==old?.job?.result))pick(selected)
       else{select.value=String(selected);message.textContent=current.job?.error||current.job?.status||'待上传';retry.disabled=current.job?.status!=='failed'}
     }
     const key=e=>{if(e.ctrlKey&&e.key==='Enter'){e.preventDefault();save.click()}if(e.ctrlKey&&e.key==='ArrowRight'){e.preventDefault();if(!dirty||confirm('跳过并放弃未保存校对？')){const i=rows.findIndex(q=>q.id===selected);pick(rows[(i+1)%rows.length]?.id)}}}

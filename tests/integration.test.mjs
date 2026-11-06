@@ -37,7 +37,7 @@ async function api(url,body,auth=token,method=body===undefined?'GET':'POST'){
   const r=await fetch(base+url,{method,headers:{Authorization:'Bearer '+auth,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)})
   return {status:r.status,data:await r.json()}
 }
-const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1sAAAAASUVORK5CYII='
+const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8//8/AwMDEwMDAwMDAwAkBgMB/DXemwAAAABJRU5ErkJggg=='
 test('旧库数据保留与30题批量后台识别',async()=>{
   if(oldSource)assert.equal(db.prepare('SELECT stem FROM questions WHERE user_id=1').get().stem,'旧数据必须保留')
   const ids=[]
@@ -63,6 +63,14 @@ test('旧库数据保留与30题批量后台识别',async()=>{
   assert.equal((await api('/api/batch/questions/'+ids[0]+'/confirm',{stem:'已校对',knowledge_points:[]})).status,200)
   assert.ok(db.prepare('SELECT review_due_at FROM questions WHERE user_id=? AND id=?').get(user.id,ids[0]).review_due_at>0)
   assert.equal((await api('/api/questions',{stem:'旧录入流程'})).status,200)
+})
+test('前台OCR与后台队列共用逐图每日额度',async()=>{
+  const before=process.env.DAILY_OCR_MAX
+  process.env.DAILY_OCR_MAX='1'
+  try{
+    assert.equal((await api('/api/ocr',{image:[png,png]},otherToken)).status,429)
+    assert.equal((await api('/api/ocr',{image:png},otherToken)).status,429)
+  }finally{if(before===undefined)delete process.env.DAILY_OCR_MAX;else process.env.DAILY_OCR_MAX=before}
 })
 test.after(async()=>{
  stop();await new Promise(r=>server.close(r));db.close()

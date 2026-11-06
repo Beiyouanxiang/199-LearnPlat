@@ -83,7 +83,7 @@ test('CLI 与真实 stdio MCP 客户端回写、scope及吊销',async()=>{
 })
 test('双图OCR、校对更正、可选模型模拟批改',async()=>{
   const e=(await api('/api/essays',{kind:'argument'})).data,url='/api/essays/'+e.id
-  const image='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1sAAAAASUVORK5CYII='
+  const image='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8//8/AwMDEwMDAwMDAwAkBgMB/DXemwAAAABJRU5ErkJggg=='
   for(let position=0;position<2;position++)assert.equal((await api(url+'/images',{role:'answer',position,image})).status,200)
   async function completed(job){for(let i=0;i<50;i++){
     const r=(await api('/api/jobs?ids='+job.id)).data.items[0]
