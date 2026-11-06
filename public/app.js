@@ -252,6 +252,7 @@
     view.innerHTML = ''
     window.scrollTo(0, 0)
     const map = {
+      ...window.essayPages({h,view,API,toast,onLeave,preprocessImage}),
       home: renderHome,
       capture: renderCapture,
       batch: renderBatch,
@@ -272,6 +273,7 @@
 
   // ---------- 首页：今日任务 ----------
   async function renderHome() {
+    view.append(h('a',{class:'btn',href:'#/essays'},'写作练习'))
     view.append(h('div', {class:'filter-bar'}, [h('a',{class:'btn',href:'#/batch'},'批量上传'),h('a',{class:'btn',href:'#/review-ocr'},'待校对')]))
     view.appendChild(h('h1', { class: 'page-title' }, '今日任务'))
     const loading = h('div', { class: 'loading' }, '加载中…')
@@ -1469,6 +1471,7 @@
 
   // ---------- 更多（导入导出/设置） ----------
   async function renderMore() {
+    view.append(h('a',{class:'btn',href:'#/essay-tokens'},'管理代理令牌'))
     view.appendChild(h('h1', { class: 'page-title' }, '更多'))
 
     const settings = h('div', { class: 'card' })
