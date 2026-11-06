@@ -3,7 +3,7 @@ export const toolDefinitions=[
   {name:'list_ungraded_essays',description:'按新到旧列出已校对、待批改的作文',inputSchema:{type:'object',properties:{}}},
   {name:'get_essay',description:'取得作文、校对稿版本、评分标准和提交模板',inputSchema:{type:'object',properties:{id:{type:'integer',minimum:1}},required:['id']}},
   {name:'submit_grading',description:'向学习平台保存批改。沿用 get_essay 返回的请求标识与版本。',inputSchema:{type:'object',properties:{id:{type:'integer',minimum:1},body:{type:'object'}},required:['id','body']}},
-  {name:'get_rubric',description:'读取训练用评分量表',inputSchema:{type:'object',properties:{}}},
+  {name:'get_rubric',description:'读取评分量表，默认最新版本；可指定历史 version',inputSchema:{type:'object',properties:{version:{type:'string'}}}},
   {name:'list_wrong_questions',description:'按知识点或待整理状态读取自己的错题',inputSchema:{type:'object',properties:{kp:{type:'string'},untidy:{type:'boolean'}}}}
 ]
 export async function callTool(name,args={}) {
@@ -15,7 +15,7 @@ export async function callTool(name,args={}) {
   if(!/^lp_[a-f0-9]{64}$/.test(token||''))throw new Error('请设置 LEARNPLAT_TOKEN')
   const id=Number(args.id)
   if(['get_essay','submit_grading'].includes(name)&&(!Number.isSafeInteger(id)||id<1))throw new Error('需要有效作文编号')
-  const routes={list_ungraded_essays:'essays?status=ungraded',get_essay:'essays/'+id,submit_grading:'essays/'+id+'/gradings',get_rubric:'rubric',
+  const routes={list_ungraded_essays:'essays?status=ungraded',get_essay:'essays/'+id,submit_grading:'essays/'+id+'/gradings',get_rubric:'rubric'+(args.version?'?'+new URLSearchParams({version:args.version}):''),
     list_wrong_questions:'questions?'+new URLSearchParams({kp:args.kp||'',untidy:args.untidy?'1':'0'})}
   if(!Object.hasOwn(routes,name))throw new Error('未知工具')
   const write=name==='submit_grading'

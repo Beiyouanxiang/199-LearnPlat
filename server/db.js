@@ -15,7 +15,8 @@ function ensureMode(dir, file) {
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
     fs.chmodSync(dir, 0o700)
-    if (fs.existsSync(file)) fs.chmodSync(file, 0o600)
+    // 上传目录没有对应文件，不能将空路径传给 existsSync。
+    if (file != null && fs.existsSync(file)) fs.chmodSync(file, 0o600)
   } catch (err) {
     console.warn('[db] 无法设置文件权限:', err.message)
   }

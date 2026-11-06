@@ -1,12 +1,14 @@
-import { rubric } from './content/essay-rubric.js'
+import { rubric, getRubric } from './content/essay-rubric.js'
 const string = {type:'string',minLength:1,maxLength:20000}
 const integer = {type:'integer',minimum:0}
 const array = items => ({type:'array',items,maxItems:100})
 const object = properties => ({type:'object',properties,required:Object.keys(properties),additionalProperties:false})
 const issue = object({quote:string,kind:{enum:['逻辑','结构','病句','错别字']},problem:string,fix:string})
-export function outputSchema(kind) {
+export function outputSchema(kind,version=rubric.version) {
+  const selected=getRubric(version)
+  if(!selected||!['argument','essay'].includes(kind))problem('未知量表版本或作文类型')
   const common = {
-    rubric_version:{const:rubric.version}, total:integer, max:{const:rubric[kind].max}, band:string,
+    rubric_version:{const:selected.version}, total:integer, max:{const:selected[kind].max}, band:string,
     dimensions:array(object({name:string,max:integer,score:integer,comment:string})),
     issues:array(issue),rewrite_sample:string,next_focus:{...array(string),minItems:1,maxItems:3}
   }
@@ -35,9 +37,9 @@ function check(schema,value,path='result') {
     for(const k of schema.required)check(schema.properties[k],value[k],path+'.'+k)
   }
 }
-export function validate(essay,value) {
-  check(outputSchema(essay.kind),value)
-  const spec=rubric[essay.kind], result=structuredClone(value)
+export function validate(essay,value,version=rubric.version) {
+  check(outputSchema(essay.kind,version),value)
+  const spec=getRubric(version)[essay.kind], result=structuredClone(value)
   const names=new Set()
   for(const d of result.dimensions) {
     if(!Object.hasOwn(spec.dimensions,d.name)||names.has(d.name)||d.max!==spec.dimensions[d.name]||d.score>d.max)
@@ -45,8 +47,9 @@ export function validate(essay,value) {
     names.add(d.name)
   }
   if(names.size!==Object.keys(spec.dimensions).length || result.dimensions.reduce((s,d)=>s+d.score,0)!==result.total)problem('维度得分之和须等于总分')
-  const band=spec.bands?.find(([,min])=>result.total>=min)?.[0]||spec.band
-  if(result.band!==band)problem('总分对应档次应为 '+band)
+  const bandScore=spec.band_dimension?result.dimensions.find(d=>d.name===spec.band_dimension).score:result.total
+  const band=spec.bands?.find(([,min])=>bandScore>=min)?.[0]||spec.band
+  if(result.band!==band)problem((spec.band_dimension||'总分')+'对应档次应为 '+band)
   for(const item of [...result.issues,...(result.flaws_found||[])]) {
     item.positions=[]
     let offset=0

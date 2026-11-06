@@ -7,6 +7,8 @@ import {promisify} from 'node:util'
 import {execFile} from 'node:child_process'
 import {createRequire} from 'node:module'
 import {fileURLToPath} from 'node:url'
+import {randomUUID} from 'node:crypto'
+import {rubric,getRubric} from '../server/content/essay-rubric.js'
 const run=promisify(execFile)
 const root=await fs.mkdtemp(path.join(os.tmpdir(),'learnplat-essay-'))
 Object.assign(process.env,{NODE_ENV:'test',LEARNPLAT_DATA_DIR:path.join(root,'data'),LEARNPLAT_UPLOAD_DIR:path.join(root,'uploads'),
@@ -71,6 +73,9 @@ test('CLI 与真实 stdio MCP 客户端回写、scope及吊销',async()=>{
   try{
     assert.equal((await client.listTools()).tools.length,5)
     const call=async(name,args={})=>{const response=await client.callTool({name,arguments:args});assert.ok(!response.isError,response.content[0].text);return JSON.parse(response.content[0].text)}
+    assert.equal((await call('get_rubric')).version,rubric.version)
+    assert.equal((await call('get_rubric',{version:'2027-training-v1'})).version,'2027-training-v1')
+    assert.equal(JSON.parse((await run(process.execPath,[cli,'rubric','2027-training-v1'],{env})).stdout).version,'2027-training-v1')
     await call('list_ungraded_essays');const bundle=await call('get_essay',{id:e.id})
     const saved=await call('submit_grading',{id:e.id,body:answer(bundle)});assert.ok(saved.id)
     const detail=(await api(url)).data;assert.deepEqual(detail.gradings.map(x=>x.grader),['claude','codex'])
@@ -80,6 +85,38 @@ test('CLI 与真实 stdio MCP 客户端回写、scope及吊销',async()=>{
     await api('/api/tokens/'+t.id,undefined,jwt,'DELETE')
     assert.equal((await api('/api/agent/essays',undefined,t.token)).status,401)
   }finally{await client.close()}
+})
+test('升级前材料包可延迟回写，新旧量表记录并存且版本不能冒用',async()=>{
+  const e=(await api('/api/essays',{kind:'essay'})).data,url='/api/essays/'+e.id
+  await api(url+'/confirm',{revision:0,transcript:'协作。协作。'})
+  // 模拟升级前已签发但尚未提交的材料包，不改动历史结果。
+  const meta={essay_id:e.id,request_id:randomUUID(),transcript_revision:1,rubric_version:'2027-training-v1',schema_version:'1'}
+  db.prepare('INSERT INTO essay_requests VALUES(?,?,?,?,?,?)').run(meta.request_id,user.id,e.id,1,meta.rubric_version,'1')
+  const old=answer({response_template:meta,rubric_version:meta.rubric_version,rubric:getRubric(meta.rubric_version)})
+  const current=answer((await api(url+'/package',{})).data)
+  assert.equal(current.rubric_version,rubric.version)
+  assert.equal((await api(url+'/gradings',old)).status,200)
+  assert.equal((await api(url+'/gradings',current)).status,200)
+  assert.equal((await api(url+'/gradings',old)).data.duplicate,true)
+  assert.equal((await api(url+'/gradings',current)).data.duplicate,true)
+  const detail=(await api(url)).data
+  assert.deepEqual(detail.gradings.map(g=>g.rubric_version),[rubric.version,'2027-training-v1'])
+  for(const g of detail.gradings){
+    assert.equal(g.result.rubric_version,g.rubric_version)
+    assert.equal(g.rubric.version,g.rubric_version)
+    assert.deepEqual(g.result.issues[0].positions,[[0,2],[3,5]])
+  }
+  assert.equal((await api(url+'/preview',{...old,rubric_version:rubric.version})).status,409)
+  assert.equal((await api(url+'/preview',{...old,result:{...old.result,rubric_version:rubric.version}})).status,422)
+  assert.equal((await api(url+'/preview',{...current,result:{...current.result,rubric_version:'unknown'}})).status,422)
+  assert.equal((await api(url+'/preview',old,otherJwt)).status,404)
+  const token=(await api('/api/tokens',{scopes:['essays:read']})).data.token
+  assert.equal((await api('/api/agent/rubric?version=unknown',undefined,token)).status,404)
+  assert.equal((await api('/api/agent/rubric?version=__proto__',undefined,token)).status,404)
+  await api(url+'/confirm',{revision:1,transcript:'协作新版'})
+  assert.equal((await api(url+'/gradings',old)).status,409)
+  assert.equal((await api(url+'/gradings',current)).status,409)
+  assert.equal((await api(url)).data.gradings[0].transcript,'协作。协作。')
 })
 test('双图OCR、校对更正、可选模型模拟批改',async()=>{
   const e=(await api('/api/essays',{kind:'argument'})).data,url='/api/essays/'+e.id

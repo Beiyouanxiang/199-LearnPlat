@@ -52,4 +52,26 @@ claude mcp add --transport stdio learnplat -- node --env-file=/absolute/path/cla
 
 工具还支持 get_rubric 和 list_wrong_questions。平台仅在用户的客户端会话中读写作文。使用客户端自己的登录方式与额度即可。stdio 服务在客户端设备运行，网页版聊天使用上面的文件交换流程。
 
+## 量表版本与隔离验收
+
+新材料包使用 `2027-verified-v1`。历史 `2027-training-v1` 记录和未改稿的旧材料包继续可用；提交时原样保留包里的版本，不要替换成最新版本。论证有效性分析新版的 `band` 对应 14 分的“论证组织与表达”维度，不对应 30 分总分。核实依据与计分口径见 [2027 量表说明](ESSAY-RUBRIC-2027.md)。
+
+`GET /api/agent/rubric` 与 MCP `get_rubric` 默认读取当前版本；分别加 `?version=2027-training-v1` 或传入 `{"version":"2027-training-v1"}` 可读取旧版。CLI 对应 `rubric [version]`。未知版本返回 404。
+
+在共享机器验收时，另设 `PORT`、`LEARNPLAT_DATA_DIR` 和 `LEARNPLAT_UPLOAD_DIR`，不要复用他人的预览端口或数据目录。两篇原创验收材料在 `tests/fixtures/essays.mjs`。代理令牌只授予 `essays:read`、`essays:write`，环境文件放在仓库外并设为 `chmod 600`。
+
+可用 Codex 的进程级 `-c` 参数配置一次性 MCP，无需修改用户的配置文件：
+
+```bash
+/usr/lib/chatgpt/resources/codex --no-daemon exec --ephemeral --ignore-user-config \
+  -c mcp_servers.node_repl.enabled=false \
+  -c 'mcp_servers.node_repl.command="node"' \
+  -c 'mcp_servers.learnplat.command="node"' \
+  -c 'mcp_servers.learnplat.args=["--env-file=/tmp/learnplat-check/learnplat.env","/absolute/path/199-LearnPlat-work/scripts/mcp-server.mjs"]' \
+  -c mcp_servers.learnplat.required=true \
+  '批改隔离实例中指定的已校对作文，并用 submit_grading 保存。'
+```
+
+这里使用官方 CLI 已登录的身份，不读取 `auth.json`。在 CLI 0.166.0-alpha.5.1 中，配合 `--ignore-user-config` 禁用 `node_repl` 时也需提供合法的 transport 定义，因此为这个禁用项补 `command="node"`；它不会启动。正式验收须检查 HTTP 返回的 `grader=codex`、量表版本、维度合计和所有引文位置，再在浏览器点选意见核对高亮。结束后关掉自己启动的临时实例，不把测试数据或令牌提交到 Git。
+
 配置参考：[Codex MCP](https://developers.openai.com/codex/mcp/) · [Claude Code MCP](https://code.claude.com/docs/en/mcp)

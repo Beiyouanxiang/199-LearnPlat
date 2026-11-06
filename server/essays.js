@@ -5,7 +5,7 @@ import {jobStore,handlers,consumeCall,modelError} from './jobs.js'
 import {parseImageInput,callOcr} from './providers/ocr.js'
 import {callEssayChat} from './providers/tutor.js'
 import {essayStore,digest} from './essay-store.js'
-import {rubric} from './content/essay-rubric.js'
+import {rubric,getRubric} from './content/essay-rubric.js'
 import {problem} from './essay-schema.js'
 const store=essayStore(db)
 const images=(u,id)=>db.prepare('SELECT * FROM essay_images WHERE user_id=? AND essay_id=? ORDER BY role,position').all(u,id)
@@ -42,8 +42,8 @@ handlers.set('essay_ocr',async job=>{
   return {parts}
 })
 function exampleResult(bundle) {
-  const spec=rubric[bundle.kind]
-  return {rubric_version:rubric.version,total:spec.max,max:spec.max,band:spec.band||'一类卷',
+  const spec=bundle.rubric[bundle.kind]
+  return {rubric_version:bundle.rubric_version,total:spec.max,max:spec.max,band:spec.band||spec.bands[0][0],
     dimensions:Object.entries(spec.dimensions).map(([name,max])=>({name,max,score:max,comment:'测试样例'})),
     issues:[],rewrite_sample:'模拟结果仅用于验证接口。',next_focus:['请用真实客户端复核。'],
     ...(bundle.kind==='argument'?{flaws_found:[],flaws_missed:[]}:{thesis:'测试',structure:'测试'})}
@@ -72,13 +72,13 @@ handlers.set('essay_grade',async job=>{
 })
 export function installEssays(app,auth,limit,makeRateLimit) {
   const list=user=>db.prepare('SELECT id,kind,source,year,status,revision,created_at FROM essays WHERE user_id=? ORDER BY id DESC LIMIT 200').all(user)
-  const readGrade=db.prepare('SELECT id,grader,result,transcript,revision,created_at FROM essay_gradings WHERE user_id=? AND essay_id=? ORDER BY id DESC LIMIT 100')
+  const readGrade=db.prepare('SELECT id,grader,rubric_version,result,transcript,revision,created_at FROM essay_gradings WHERE user_id=? AND essay_id=? ORDER BY id DESC LIMIT 100')
   app.get('/api/essays',auth,(q,r)=>r.json({items:list(q.userId),scores:db.prepare('SELECT essay_id,total,max,created_at FROM essay_gradings WHERE user_id=? ORDER BY created_at DESC LIMIT 100').all(q.userId)}))
   app.post('/api/essays',auth,safe((q,r)=>r.json(store.create(q.userId,q.body||{}))))
   app.get('/api/essays/:id',auth,safe((q,r)=>{
     const id=Number(q.params.id)
     r.json({...store.get(q.userId,id),images:images(q.userId,id).map(({id,role,position})=>({id,role,position})),
-      gradings:readGrade.all(q.userId,id).map(g=>({...g,result:JSON.parse(g.result)})),
+      rubric,gradings:readGrade.all(q.userId,id).map(g=>({...g,result:JSON.parse(g.result),rubric:getRubric(g.rubric_version)||null})),
       jobs:db.prepare("SELECT id,status,error,kind FROM jobs WHERE user_id=? AND ref_id=? AND kind IN ('essay_ocr','essay_grade') ORDER BY id DESC LIMIT 12").all(q.userId,id)})
   }))
   app.post('/api/essays/:id/images',auth,safe(async(q,r)=>{
@@ -143,7 +143,11 @@ export function installEssays(app,auth,limit,makeRateLimit) {
     r.status(t.changes?200:404).json(t.changes?{ok:true}:{error:'令牌不存在'})
   })
   const agentLimit=makeRateLimit(60000,60,q=>String(q.userId))
-  app.get('/api/agent/rubric',tokenAuth('essays:read'),agentLimit,(q,r)=>r.json(rubric))
+  app.get('/api/agent/rubric',tokenAuth('essays:read'),agentLimit,safe((q,r)=>{
+    const selected=getRubric(q.query.version)
+    if(!selected)problem('未知量表版本',404)
+    r.json(selected)
+  }))
   app.get('/api/agent/essays',tokenAuth('essays:read'),agentLimit,(q,r)=>{
     const status=q.query.status==='ungraded'?['transcribed']:['transcribed','graded']
     r.json({items:list(q.userId).filter(e=>status.includes(e.status))})

@@ -1,6 +1,6 @@
 import {diffChars} from 'diff'
 import {randomUUID,createHash} from 'node:crypto'
-import {rubric} from './content/essay-rubric.js'
+import {rubric,getRubric} from './content/essay-rubric.js'
 import {outputSchema,validate,problem} from './essay-schema.js'
 import {readFileSync} from 'node:fs'
 const instructions=readFileSync(new URL('./prompts/essay-grade.md',import.meta.url),'utf8')
@@ -75,9 +75,9 @@ export function essayStore(db) {
     const e=ready(user,id)
     const r=db.prepare('SELECT * FROM essay_requests WHERE request_id=? AND user_id=? AND essay_id=?').get(String(body?.request_id||''),user,id)
     if(!r||body.essay_id!==id||r.revision!==e.revision||body.transcript_revision!==e.revision||
-      r.rubric_version!==rubric.version||body.rubric_version!==r.rubric_version||body.schema_version!==r.schema_version)
+      !getRubric(r.rubric_version)||body.rubric_version!==r.rubric_version||body.schema_version!==r.schema_version)
       problem('批改材料与当前作文版本不匹配，请重新导出',409)
-    return validate(e,body.result)
+    return validate(e,body.result,r.rubric_version)
   }
   function submit(user,id,body,grader) {
     const verified=preview(user,id,body)
@@ -87,7 +87,7 @@ export function essayStore(db) {
     const e=get(user,id)
     const insert=()=>{
       const r=db.prepare('INSERT INTO essay_gradings(user_id,essay_id,request_id,revision,grader,rubric_version,total,max,result,raw,transcript,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(user,id,body.request_id,e.revision,grader,rubric.version,verified.total,verified.max,raw,raw,e.transcript,Date.now())
+        .run(user,id,body.request_id,e.revision,grader,verified.rubric_version,verified.total,verified.max,raw,raw,e.transcript,Date.now())
       db.prepare("UPDATE essays SET status='graded',updated_at=? WHERE user_id=? AND id=?").run(Date.now(),user,id)
       return {id:Number(r.lastInsertRowid),duplicate:false}
     }

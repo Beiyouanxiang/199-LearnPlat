@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {execFileSync} from 'node:child_process'
+import {fileURLToPath,pathToFileURL} from 'node:url'
 
 const root=await fs.mkdtemp(path.join(os.tmpdir(),'learnplat-test-'))
 process.env.NODE_ENV='test'
@@ -14,18 +15,23 @@ process.env.RATE_MAX='1000'
 process.env.JWT_SECRET='integration-test-only'
 let oldSource
 try{oldSource=execFileSync('git',['show','origin/main:server/db.js'],{encoding:'utf8'})}catch{if(process.env.REQUIRE_MIGRATION==='1')throw new Error('无法读取main旧版数据库，迁移测试不可跳过')}
-let fixture
+let legacy
 if(oldSource){
-  fixture=new URL('./.old-db-fixture.mjs',import.meta.url)
+  const fixture=pathToFileURL(path.join(root,'old-db-fixture.mjs'))
+  await fs.symlink(fileURLToPath(new URL('../node_modules',import.meta.url)),path.join(root,'node_modules'),'dir')
   oldSource=oldSource.replace(/const ROOT =[^\n]+/, 'const ROOT = '+JSON.stringify(root))
+  // 只适配旧夹具的空文件路径；保留 origin/main 的全部建库与写入 SQL。
+  oldSource=oldSource.replace('if (fs.existsSync(file))', 'if (file != null && fs.existsSync(file))')
   await fs.writeFile(fixture,oldSource)
   const old=await import(fixture.href)
   old.createUser('legacy','fixture-only')
   old.createQuestion(1,{stem:'旧数据必须保留',source:'migration fixture'})
+  legacy={user:old.default.prepare('SELECT * FROM users WHERE id=1').get(),
+    question:old.default.prepare('SELECT * FROM questions WHERE user_id=1').get()}
   old.default.close()
 }
 const {default:app}=await import('../server/index.js')
-const {default:db,createUser}=await import('../server/db.js')
+const {default:db,createUser,dayStartAfter}=await import('../server/db.js')
 const {signToken}=await import('../server/auth.js')
 const {startJobs}=await import('../server/jobs.js')
 const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r))
@@ -39,7 +45,20 @@ async function api(url,body,auth=token,method=body===undefined?'GET':'POST'){
 }
 const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8//8/AwMDEwMDAwMDAwAkBgMB/DXemwAAAABJRU5ErkJggg=='
 test('旧库数据保留与30题批量后台识别',async()=>{
-  if(oldSource)assert.equal(db.prepare('SELECT stem FROM questions WHERE user_id=1').get().stem,'旧数据必须保留')
+  if(legacy){
+    assert.deepEqual(db.prepare('SELECT * FROM users WHERE id=1').get(),legacy.user)
+    const upgraded=db.prepare('SELECT * FROM questions WHERE user_id=1').get()
+    for(const [key,value] of Object.entries(legacy.question)){
+      // 冲刺版已有迁移会为旧题补排复习日，其余原有字段须逐项保留。
+      const expected=key==='review_due_at'&&value===0&&!Object.hasOwn(legacy.question,'review_stage')
+        &&legacy.question.mastery!=='mastered'?dayStartAfter(upgraded.id%7):value
+      assert.equal(upgraded[key],expected,key)
+    }
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM questions_fts WHERE questions_fts MATCH '旧'").get().n,1)
+    assert.equal(db.pragma('integrity_check',{simple:true}),'ok')
+    for(const table of ['jobs','essays','essay_requests','essay_gradings','api_tokens'])
+      assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table))
+  }
   const ids=[]
   for(let i=0;i<30;i++){
     const body={request_id:'test-item-'+i,batch:'test-batch-123',count:1}
@@ -74,6 +93,5 @@ test('前台OCR与后台队列共用逐图每日额度',async()=>{
 })
 test.after(async()=>{
  stop();await new Promise(r=>server.close(r));db.close()
- if(fixture)await fs.unlink(fixture)
- // 临时数据留在系统临时目录，避免测试清理路径误删。
+ await fs.rm(root,{recursive:true,force:true})
 })

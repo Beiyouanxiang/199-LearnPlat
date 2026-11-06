@@ -37,10 +37,13 @@ window.essayPages = function ({h,view,API,toast,onLeave,preprocessImage}) {
         location.hash='#/essays/'+e.id
       })]))
   }
-  function report(g){
+  function report(g,kind){
     const r=g.result,original=h('pre',{class:'essay-text'},g.transcript)
-    const card=h('section',{class:'card essay-report'},[h('h3',{},r.total+' / '+r.max+' · '+r.band),
+    const spec=g.rubric?.[kind],bandNote=spec?.band_dimension?'（'+spec.band_dimension+'档）':''
+    const card=h('section',{class:'card essay-report'},[h('h3',{},r.total+' / '+r.max+' · '+r.band+bandNote),
       h('p',{class:'dim'},g.grader+' · 校对稿 v'+g.revision+' · '+r.rubric_version),
+      h('p',{class:'dim'},g.rubric?.notice||'估分仅供参考，按本次批改记录的量表版本解读。'),
+      spec?.band_notice?h('p',{class:'dim'},spec.band_notice):null,
       ...r.dimensions.map(d=>h('p',{},d.name+' '+d.score+'/'+d.max+'　'+d.comment)),original])
     function point(item,label) {
       const ranges=item.positions||[]
@@ -67,7 +70,7 @@ window.essayPages = function ({h,view,API,toast,onLeave,preprocessImage}) {
     source.oninput=draft.oninput=()=>{dirty=true}
     const imports=h('textarea',{rows:6,placeholder:'在这里粘贴模型返回的完整 JSON'})
     const preview=h('div'),reports=h('div',{class:'essay-reports'}),exchange=h('section',{class:'card'})
-    const updateReports=()=>reports.replaceChildren(...e.gradings.map(report))
+    const updateReports=()=>reports.replaceChildren(...e.gradings.map(g=>report(g,e.kind)))
     function canExport(){if(dirty||!e.revision)throw new Error('请先保存并确认当前校对稿')}
     const pack=async()=>{canExport();return JSON.stringify(await post(url+'/package'),null,2)}
     const saveImport=button('确认保存这份批改',async()=>{
@@ -86,7 +89,8 @@ window.essayPages = function ({h,view,API,toast,onLeave,preprocessImage}) {
       button('下载批改材料',async()=>download('essay-'+id+'-v'+e.revision+'.json',await pack())),
       field('批改来源（自行声明）',origin),field('结果文件',file),imports,
       button('校验并预览',async()=>{canExport();clearPreview();const candidate=JSON.parse(imports.value);const r=await post(url+'/preview',candidate)
-        imported=candidate;preview.replaceChildren(report({result:r,transcript:e.transcript,grader:origin.value,revision:e.revision}));saveImport.hidden=false}),
+        const selected=e.gradings.find(g=>g.rubric_version===r.rubric_version)?.rubric||(e.rubric?.version===r.rubric_version?e.rubric:null)
+        imported=candidate;preview.replaceChildren(report({result:r,transcript:e.transcript,grader:origin.value,revision:e.revision,rubric:selected},e.kind));saveImport.hidden=false}),
       preview,saveImport,button('使用已配置的服务端模型',async()=>{canExport();await post(url+'/grade',{key:gradeKey});gradeKey=crypto.randomUUID();await refresh()}))
     async function refresh(){
       const fresh=await API.req(url);if(!alive)return
@@ -122,7 +126,7 @@ window.essayPages = function ({h,view,API,toast,onLeave,preprocessImage}) {
       h('div',{class:'review-columns'},[imageArea,h('div',{},[field('题目材料',source),field('校对稿（可直接手动填写）',draft),
         button('确认校对稿',async()=>{await post(url+'/confirm',{revision:editorRevision,transcript:draft.value,prompt_text:source.value})
           dirty=false;clearPreview();uploads.hidden=true;e=await API.req(url);editorRevision=e.revision;exchange.hidden=false;updateReports();toast('已确认 v'+e.revision)})])]),
-      exchange,h('h2',{},'历次批改'),h('p',{class:'dim'},'估分仅供参考。当前采用训练量表，2027 年评分细则待核实。'),reports)
+      exchange,h('h2',{},'历次批改'),h('p',{class:'dim'},'估分仅供参考。各次批改保留当时的量表版本；论证有效性分析的四档仅对应论证组织与表达部分。'),reports)
     exchange.hidden=!e.revision;updateReports()
     const timer=setInterval(()=>refresh().catch(()=>{}),3000)
     onLeave(()=>{alive=false;clearInterval(timer);urls.forEach(url=>URL.revokeObjectURL(url))})

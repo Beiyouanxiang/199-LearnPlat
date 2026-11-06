@@ -22,6 +22,7 @@ const errors=[];context.on('page',p=>p.on('pageerror',e=>errors.push(e.message))
 const user='mobile'+Date.now()
 const reg=await page.request.post(base+'/api/auth/register',{data:{username:user,password:'test-fixture-123'}})
 assert.ok(reg.ok())
+const userId=(await reg.json()).user.id
 await page.goto(base)
 await page.locator('input[name=username]').fill(user);await page.locator('input[name=password]').fill('test-fixture-123')
 await page.locator('#auth-submit').click()
@@ -65,9 +66,26 @@ await page.getByRole('button',{name:'确认保存这份批改'}).click()
 await page.locator('.essay-reports .essay-report').waitFor()
 await page.locator('.essay-reports').getByRole('button',{name:'结构 · 协作'}).click()
 assert.equal(await page.locator('.essay-reports mark').textContent(),'协作')
+// 历史材料包跨升级回写后，两条报告都应按自己的版本显示并定位。
+const legacyMeta={...bundle.response_template,request_id:crypto.randomUUID(),rubric_version:'2027-training-v1'}
+db.prepare('INSERT INTO essay_requests VALUES(?,?,?,?,?,?)').run(legacyMeta.request_id,userId,bundle.essay_id,bundle.transcript_revision,legacyMeta.rubric_version,'1')
+const legacy={...legacyMeta,result:{...result.result,rubric_version:legacyMeta.rubric_version}}
+await page.getByPlaceholder('在这里粘贴模型返回的完整 JSON').fill(JSON.stringify(legacy))
+await page.getByRole('button',{name:'校验并预览'}).click()
+await page.getByRole('button',{name:'确认保存这份批改'}).click()
+await page.waitForFunction(()=>document.querySelectorAll('.essay-reports .essay-report').length===2)
+const reports=page.locator('.essay-reports .essay-report')
+assert.match(await reports.nth(0).textContent(),/2027-training-v1/)
+assert.match(await reports.nth(0).textContent(),/待人工核实/)
+assert.match(await reports.nth(1).textContent(),/2027-verified-v1/)
+assert.match(await reports.nth(1).textContent(),/评分要求已核实/)
+for(let i=0;i<2;i++){
+  await reports.nth(i).getByRole('button',{name:'结构 · 协作'}).click()
+  assert.equal(await reports.nth(i).locator('mark').textContent(),'协作')
+}
 assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))
 assert.deepEqual(errors,[])
-console.log('375px作文手动录入、下载材料、JSON预览与保存、引用高亮通过')
+console.log('375px作文手动录入、下载材料、新旧量表并存、JSON预览与保存、两版引用高亮通过')
 } finally {
   await browser?.close();stop();await new Promise(r=>server.close(r));db.close()
   await fs.rm(root,{recursive:true,force:true})
