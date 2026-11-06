@@ -246,13 +246,14 @@
     const [path, qs] = raw.split('?')
     const [name, param] = path.split('/')
     const query = new URLSearchParams(qs || '')
+    const activeNav = name === 'essay-tokens' ? 'essays' : name === 'topic' ? 'topics' : (name === 'batch' || name === 'review-ocr' || name === 'capture') ? 'home' : name
     $$('#nav a').forEach((a) => {
-      a.classList.toggle('active', a.dataset.route === name)
+      a.classList.toggle('active', a.dataset.route === activeNav)
     })
     view.innerHTML = ''
     window.scrollTo(0, 0)
     const map = {
-      ...window.essayPages({h,view,API,toast,onLeave,preprocessImage}),
+      ...window.essayPages({h,view,API,toast,onLeave,preprocessImage,makeUUID,copyText}),
       home: renderHome,
       capture: renderCapture,
       batch: renderBatch,
@@ -273,15 +274,18 @@
 
   // ---------- 首页：今日任务 ----------
   async function renderHome() {
-    view.append(h('a',{class:'btn',href:'#/essays'},'写作练习'))
-    view.append(h('div', {class:'filter-bar'}, [h('a',{class:'btn',href:'#/batch'},'批量上传'),h('a',{class:'btn',href:'#/review-ocr'},'待校对')]))
+    let gone = false
+    onLeave(() => { gone = true })
     view.appendChild(h('h1', { class: 'page-title' }, '今日任务'))
     const loading = h('div', { class: 'loading' }, '加载中…')
     view.appendChild(loading)
-    const [today, recent] = await Promise.all([
+    const [today, recent, batchRev, essayData] = await Promise.all([
       API.req('/api/today'),
       API.req('/api/questions?limit=5'),
+      API.req('/api/batch/review').catch(() => ({ items: [] })),
+      API.req('/api/essays').catch(() => ({ items: [], scores: [] })),
     ]).finally(() => loading.remove())
+    if (gone) return
 
     // 考试倒计时（日期在"更多"里设置，仅存本机）
     const examDate = localStorage.getItem('examDate')
@@ -309,10 +313,46 @@
     tasks.appendChild(taskCard('🧠', '公式卡', cardCount
       ? `${today.cards_due} 张到期 + ${today.cards_new} 张新卡（已学 ${today.cards_learned}/${today.cards_total}）`
       : `今天的公式卡已完成（已学 ${today.cards_learned}/${today.cards_total}）`, cardCount ? '开始背' : '浏览', () => { location.hash = cardCount ? '#/cards' : '#/cards/all' }, !cardCount))
+    const essayItems = essayData?.items || [], essayScores = essayData?.scores || []
+    const ungradedEssays = essayItems.filter(x => x.status !== 'graded').length
+    const latestScore = essayScores[0]
+    const essayDesc = essayItems.length
+      ? `已写 ${essayItems.length} 篇` + (latestScore ? ` · 最近估分 ${latestScore.total}/${latestScore.max}` : '') + (ungradedEssays ? ` · ${ungradedEssays} 篇待批改` : '')
+      : '论证有效性分析（30 分）+ 论说文（35 分）· 支持拍照识别与无 Key 批改'
+    tasks.appendChild(h('div', { class: 'task-card' }, [
+      h('div', { class: 'tc-icon' }, '✍️'),
+      h('div', { class: 'tc-body' }, [h('div', { class: 'tc-title' }, '写作练习'), h('div', { class: 'tc-desc' }, essayDesc)]),
+      h('div', { class: 'tc-actions' }, [
+        h('a', { class: 'btn', href: '#/essays' }, '写作练习'),
+        h('a', { class: 'btn btn-primary', href: '#/essays/new' }, '新建作文'),
+      ]),
+    ]))
+    const pendingOcr = (batchRev?.items || []).length
+    if (pendingOcr) {
+      tasks.appendChild(h('div', { class: 'task-card' }, [
+        h('div', { class: 'tc-icon' }, '📝'),
+        h('div', { class: 'tc-body' }, [
+          h('div', { class: 'tc-title' }, `OCR 待校对（${pendingOcr}）`),
+          h('div', { class: 'tc-desc' }, `${pendingOcr} 道批量导入错题待核对题干，确认后自动排入复习计划`),
+        ]),
+        h('div', { class: 'tc-actions' }, [h('a', { class: 'btn btn-primary', href: '#/review-ocr' }, '待校对')]),
+      ]))
+    }
     if (today.untidy) {
       tasks.appendChild(taskCard('🗂', '待整理', `${today.untidy} 道题只存了图片，补上答案和知识点后复习更有效`, '去整理', () => { location.hash = '#/list?untidy=1' }))
     }
-    tasks.appendChild(taskCard('📸', '录错题', '做题时错了就拍照，可以先只存图，有空再整理', '拍照录题', () => { location.hash = '#/capture' }))
+    tasks.appendChild(h('div', { class: 'task-card' }, [
+      h('div', { class: 'tc-icon' }, '📸'),
+      h('div', { class: 'tc-body' }, [
+        h('div', { class: 'tc-title' }, '录错题'),
+        h('div', { class: 'tc-desc' }, '支持单题拍照裁剪，或一次拖入多张错题照片后台批量识别'),
+      ]),
+      h('div', { class: 'tc-actions' }, [
+        !pendingOcr ? h('a', { class: 'btn btn-ghost btn-sm', href: '#/review-ocr' }, '待校对') : null,
+        h('a', { class: 'btn', href: '#/batch' }, '批量上传'),
+        h('button', { class: 'btn btn-primary', onclick: () => { location.hash = '#/capture' } }, '拍照录题'),
+      ]),
+    ]))
     view.appendChild(tasks)
 
     if (today.weak.length) {
@@ -495,8 +535,13 @@
 
   // ---------- 录题 ----------
   async function renderCapture() {
-    view.appendChild(h('h1', { class: 'page-title' }, '录题'))
-    view.append(h('a',{class:'btn',href:'#/batch'},'多题批量上传'))
+    view.appendChild(h('div', { class: 'page-head' }, [
+      h('h1', { class: 'page-title' }, '拍照录题'),
+      h('div', { class: 'head-actions' }, [
+        h('a', { class: 'btn btn-sm', href: '#/batch' }, '📚 多题批量上传'),
+        h('a', { class: 'btn btn-sm', href: '#/review-ocr' }, '📝 待校对'),
+      ]),
+    ]))
     const images = [] // { dataUri, mime }
 
     const card = h('div', { class: 'card' })
@@ -1518,6 +1563,87 @@
   }
 
 
+  // ---------- HTTP 非安全上下文兼容（UUID / SHA-256 / 剪贴板） ----------
+  function makeUUID() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+    const bytes = new Uint8Array(16)
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') crypto.getRandomValues(bytes)
+    else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256)
+    bytes[6] = (bytes[6] & 0x0f) | 0x40
+    bytes[8] = (bytes[8] & 0x3f) | 0x80
+    const hex = [...bytes].map(b => b.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  }
+  function sha256Pure(bytes) {
+    const K = [
+      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+    ]
+    let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19
+    const l = bytes.length, bitHi = Math.floor((l * 8) / 0x100000000), bitLo = (l * 8) >>> 0
+    const padLen = Math.ceil((l + 9) / 64) * 64
+    const buf = new Uint8Array(padLen); buf.set(bytes); buf[l] = 0x80
+    const dv = new DataView(buf.buffer)
+    dv.setUint32(padLen - 8, bitHi, false); dv.setUint32(padLen - 4, bitLo, false)
+    const w = new Uint32Array(64)
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n))
+    for (let i = 0; i < padLen; i += 64) {
+      for (let j = 0; j < 16; j++) w[j] = dv.getUint32(i + j * 4, false)
+      for (let j = 16; j < 64; j++) {
+        const s0 = rotr(w[j-15],7) ^ rotr(w[j-15],18) ^ (w[j-15] >>> 3)
+        const s1 = rotr(w[j-2],17) ^ rotr(w[j-2],19) ^ (w[j-2] >>> 10)
+        w[j] = (w[j-16] + s0 + w[j-7] + s1) >>> 0
+      }
+      let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7
+      for (let j = 0; j < 64; j++) {
+        const S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25), ch = (e & f) ^ (~e & g)
+        const t1 = (h + S1 + ch + K[j] + w[j]) >>> 0
+        const S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22), maj = (a & b) ^ (a & c) ^ (b & c)
+        const t2 = (S0 + maj) >>> 0
+        h=g; g=f; f=e; e=(d + t1) >>> 0; d=c; c=b; b=a; a=(t1 + t2) >>> 0
+      }
+      h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0
+      h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0
+    }
+    return [h0,h1,h2,h3,h4,h5,h6,h7].map(v => v.toString(16).padStart(8,'0')).join('')
+  }
+  async function sha256Hex(arrayBuffer) {
+    if (typeof crypto !== 'undefined' && crypto.subtle && typeof crypto.subtle.digest === 'function') {
+      const digest = await crypto.subtle.digest('SHA-256', arrayBuffer)
+      return [...new Uint8Array(digest)].map(n => n.toString(16).padStart(2, '0')).join('')
+    }
+    const bytes = ArrayBuffer.isView(arrayBuffer)
+      ? new Uint8Array(arrayBuffer.buffer, arrayBuffer.byteOffset, arrayBuffer.byteLength)
+      : new Uint8Array(arrayBuffer)
+    return sha256Pure(bytes)
+  }
+  async function copyText(text) {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try { await navigator.clipboard.writeText(text); return } catch {}
+    }
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
+    document.body.appendChild(ta)
+    let ok = false
+    try {
+      ta.select()
+      ok = typeof document.execCommand === 'function' && document.execCommand('copy')
+    } catch {
+      // 权限拒绝或旧复制接口抛错时，也要清理临时元素并给出操作建议。
+    } finally {
+      document.body.removeChild(ta)
+    }
+    if (!ok) throw new Error('当前浏览器限制自动复制，请改用下载或手动复制')
+  }
+
   // ---------- 批量上传与校对 ----------
   let batchOwner = 0
   function draftDB() {
@@ -1545,20 +1671,21 @@
       c.getContext('2d').drawImage(bitmap,0,0,c.width,c.height)
       const blob=await new Promise(resolve=>c.toBlob(resolve,'image/jpeg',0.85))
       if(!blob)throw new Error('图片压缩失败')
-      const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer()))].map(n=>n.toString(16).padStart(2,'0')).join('')
+      const hash=await sha256Hex(await blob.arrayBuffer())
       return {dataUri:await fileToDataUri(blob),hash}
     }finally{bitmap.close()}
   }
   async function renderBatch() {
-    let draft=await draftStorage()||{batch:crypto.randomUUID(),groups:[],subject:'math',source:'',tags:''}
+    let draft=await draftStorage()||{batch:makeUUID(),groups:[],subject:'math',source:'',tags:''}
     let busy=false, preparing=false, gone=false
     onLeave(()=>{gone=true})
     const box=h('div'),grid=h('div',{class:'batch-grid'}),status=h('p',{role:'status'})
     const subject=h('select',{},SUBJECTS.map(s=>h('option',{value:s.key},s.label)));subject.value=draft.subject
-    const source=h('input',{placeholder:'来源，例如 2024 真题',value:draft.source})
-    const tags=h('input',{placeholder:'标签，用逗号分隔',value:draft.tags})
-    const picker=h('input',{type:'file',accept:'image/*',multiple:true})
+    const source=h('input',{placeholder:'例如：2024 真题 / 鑫全模拟',value:draft.source})
+    const tags=h('input',{placeholder:'用逗号分隔，例如：排列组合,易错',value:draft.tags})
+    const picker=h('input',{type:'file',accept:'image/*',multiple:true,style:'display:none'})
     const save=async()=>{draft.subject=subject.value;draft.source=source.value;draft.tags=tags.value;await draftStorage(draft)}
+    subject.onchange=source.oninput=tags.oninput=()=>{save().catch(()=>{})}
     const draw=()=>{
       grid.replaceChildren()
       draft.groups.forEach((g,i)=>{
@@ -1566,9 +1693,17 @@
         const button=(label,action)=>h('button',{class:'btn btn-sm',disabled:busy||g.qid,onclick:async()=>{action();await save();draw()}},label)
         controls.append(button('删除',()=>draft.groups.splice(i,1)),button('上移',()=>{if(i&&!draft.groups[i-1].qid)[draft.groups[i-1],draft.groups[i]]=[g,draft.groups[i-1]]}),
           button('合并下一题',()=>{const n=draft.groups[i+1];if(n&&!n.qid&&g.images.length+n.images.length<=20){g.images.push(...n.images);draft.groups.splice(i+1,1)}}))
-        grid.append(h('div',{class:'card'},[h('strong',{},'第 '+(i+1)+' 题 · '+g.images.length+' 张'),
-          ...g.images.map(im=>h('img',{src:im.dataUri,alt:'待上传题图',class:'batch-thumb'})),controls,
-          h('p',{class:g.error?'error':'dim'},g.error|| (g.done?'已上传并入队':g.qid?'已建题，可续传':'待上传'))]))
+        const stateText = g.error || (g.done ? '已上传并入队' : g.qid ? '已建题，可续传' : '待上传')
+        const pillCls = g.error ? 'pill pill-warn' : g.done ? 'pill pill-ok' : 'pill pill-muted'
+        grid.append(h('div',{class:'card batch-card'},[
+          h('div',{class:'batch-card-head'},[
+            h('strong',{},'第 '+(i+1)+' 题 · '+g.images.length+' 张'),
+            h('span',{class:pillCls},g.done?'已入队':g.error?'失败':'待上传'),
+          ]),
+          h('div',{class:'batch-thumbs'},g.images.map(im=>h('img',{src:im.dataUri,alt:'待上传题图',class:'batch-thumb'}))),
+          controls,
+          h('p',{class:g.error?'error':'dim'},stateText),
+        ]))
       })
       status.textContent='共 '+draft.groups.length+' 题，预计 OCR '+draft.groups.reduce((n,g)=>n+g.images.length,0)+' 次；重试可能增加调用次数。'
     }
@@ -1582,12 +1717,23 @@
           const known=draft.groups.some(g=>g.images.some(x=>x.hash===im.hash))
           const remote=await API.req('/api/batch/duplicates',{method:'POST',body:{hashes:[im.hash]}})
           if((known||remote.hashes.length)&&!confirm('这张图片已上传或已选中，仍然添加？'))continue
-          draft.groups.push({key:crypto.randomUUID(),images:[im]});await save();draw()
+          draft.groups.push({key:makeUUID(),images:[im]});await save();draw()
         }
       }catch(e){toast(e.message)}finally{preparing=false;picker.disabled=false}
     }
     picker.onchange=()=>{add([...picker.files]);picker.value=''}
-    const zone=h('div',{class:'capture-zone',ondragover:e=>e.preventDefault(),ondrop:e=>{e.preventDefault();add([...e.dataTransfer.files])}},['选择、拖拽或粘贴多张图片',picker])
+    const zone=h('div',{
+      class:'capture-zone',
+      onclick:e=>{if(e.target!==picker&&!picker.disabled)picker.click()},
+      ondragover:e=>{e.preventDefault();zone.classList.add('dragover')},
+      ondragleave:()=>zone.classList.remove('dragover'),
+      ondrop:e=>{e.preventDefault();zone.classList.remove('dragover');add([...e.dataTransfer.files])},
+    },[
+      h('div',{class:'cz-icon'},'📚'),
+      h('div',{},'点击选择、拖拽或粘贴（Ctrl/⌘+V）多张错题图片'),
+      h('div',{class:'cz-hint'},'自动压缩至 2000px 并去重 · 跨页题上传前可点「合并下一题」'),
+      picker,
+    ])
     pasteHandler=e=>{const fs=[...e.clipboardData.files];if(fs.length){e.preventDefault();add(fs)}}
     const upload=h('button',{class:'btn btn-primary',onclick:async()=>{
       if(busy||preparing)return
@@ -1608,27 +1754,49 @@
         await save();if(!gone)draw()
       }}
       try{await Promise.all([worker(),worker(),worker()])}
-      finally{busy=false;window.removeEventListener('beforeunload',unload);upload.disabled=false;picker.disabled=false;if(!gone)draw()}
+      finally{busy=false;window.removeEventListener('beforeunload',unload);upload.disabled=false;picker.disabled=false;subject.disabled=false;source.disabled=false;tags.disabled=false;if(!gone)draw()}
       toast('上传结束。已入队任务在后台继续；失败项可点击继续上传。')
     }},'上传 / 继续失败项')
-    box.append(h('h1',{},'批量上传'),h('p',{},'图片保存在本机草稿中，可刷新后继续。上传完成后即可离开，后台继续识别。'),
-      h('div',{class:'filter-bar'},[subject,source,tags]),zone,status,upload,
-      h('a',{class:'btn',href:'#/review-ocr'},'去校对'),
-      h('button',{class:'btn',onclick:async()=>{if(busy||preparing)return;if(draft.groups.some(g=>!g.done)&&!confirm('清除本机草稿？已上传到服务器的题目仍然保留。'))return;draft={batch:crypto.randomUUID(),groups:[],subject:subject.value,source:source.value,tags:tags.value};await save();draw()}},'开始新批次'),grid)
+    const resetBtn=h('button',{class:'btn',onclick:async()=>{if(busy||preparing)return;if(draft.groups.some(g=>!g.done)&&!confirm('清除本机草稿？已上传到服务器的题目仍然保留。'))return;draft={batch:makeUUID(),groups:[],subject:subject.value,source:source.value,tags:tags.value};await save();draw()}},'开始新批次')
+    box.append(
+      h('div',{class:'page-head'},[
+        h('h1',{class:'page-title'},'批量上传'),
+        h('div',{class:'head-actions'},[
+          h('a',{class:'btn',href:'#/review-ocr'},'去校对'),
+          resetBtn,
+        ]),
+      ]),
+      h('p',{class:'page-sub'},'图片保存在本机草稿中，可刷新后继续。上传完成后即可离开，后台继续识别。'),
+      h('div',{class:'card'},[
+        h('div',{class:'batch-meta-grid'},[
+          h('label',{class:'field'},[h('span',{},'所属科目'),subject]),
+          h('label',{class:'field'},[h('span',{},'题目来源（选填）'),source]),
+          h('label',{class:'field'},[h('span',{},'统一标签（选填）'),tags]),
+        ]),
+        zone,
+        h('div',{class:'batch-bar'},[status,upload]),
+      ]),
+      grid
+    )
     view.append(box);draw()
   }
   async function renderReviewOcr() {
     let rows=[],selected=0,dirty=false,gone=false
-    const select=h('select'),images=h('div'),text=h('textarea',{rows:16,placeholder:'识别结果；也可手动填写'}),preview=h('div'),message=h('p'),kp=h('div')
+    const select=h('select'),images=h('div',{class:'card'}),text=h('textarea',{rows:14,placeholder:'识别结果；也可直接手动填写 Markdown / LaTeX 公式'}),preview=h('div',{class:'stem-preview md-body'}),message=h('span',{class:'pill pill-muted'}),kp=h('div',{class:'review-kp'})
     const drawText=()=>{preview.innerHTML=renderMarkdown(text.value)}
     text.oninput=()=>{dirty=true;drawText()}
     function pick(id){
       const q=rows.find(r=>r.id===id);if(!q)return
       selected=q.id;select.value=String(q.id);dirty=false;text.value=q.stem_raw||'';drawText()
-      images.replaceChildren(...q.images.map(im=>h('img',{src:im.access_url,alt:'题目原图',class:'review-image'})))
+      images.replaceChildren(
+        h('div',{class:'section-title',style:'margin-top:0'},'原题照片'),
+        ...q.images.map(im=>h('img',{src:im.access_url,alt:'题目原图',class:'review-image'}))
+      )
       kp.replaceChildren();let result={};try{result=JSON.parse(q.job?.result||'{}')}catch{}
-      for(const k of result.suggestion?.knowledge_points||[])kp.append(h('label',{},[h('input',{type:'checkbox',value:k}),' '+k+' ']))
-      message.textContent=q.job?.error||q.job?.status||'图片未完整上传，可返回批量上传继续'
+      for(const k of result.suggestion?.knowledge_points||[])kp.append(h('label',{},[h('input',{type:'checkbox',value:k,checked:true}),' '+k]))
+      const st=q.job?.error||q.job?.status||'图片未完整上传，可返回批量上传继续'
+      message.textContent=st
+      message.className=q.job?.status==='done'?'pill pill-ok':q.job?.status==='failed'?'pill pill-warn':'pill pill-muted'
       retry.disabled=q.job?.status!=='failed'
     }
     select.onchange=()=>{if(dirty&&!confirm('放弃当前未保存校对？')){select.value=String(selected);return}pick(Number(select.value))}
@@ -1645,7 +1813,7 @@
       const r=await API.req('/api/batch/review');if(gone)return
       const old=rows.find(x=>x.id===selected);rows=r.items
       select.replaceChildren(...rows.map(q=>h('option',{value:q.id},'#'+q.id+' · '+(q.job?.status||'待上传'))))
-      if(!rows.length){selected=0;text.value='';images.replaceChildren();preview.replaceChildren();message.textContent='全部校对完成';save.disabled=true;retry.disabled=true;return}
+      if(!rows.length){selected=0;text.value='';images.replaceChildren(h('div',{class:'empty'},[h('div',{class:'em-icon'},'🎉'),h('div',{class:'em-text'},'全部题目都已校对完毕')]));preview.replaceChildren();message.textContent='全部校对完成';message.className='pill pill-ok';save.disabled=true;retry.disabled=true;return}
       save.disabled=false
       const current=rows.find(x=>x.id===selected)
       if(!current)pick(rows[0].id)
@@ -1656,7 +1824,26 @@
     document.addEventListener('keydown',key)
     const timer=setInterval(()=>refresh().catch(()=>{}),3000)
     onLeave(()=>{gone=true;clearInterval(timer);document.removeEventListener('keydown',key)})
-    view.append(h('h1',{},'待校对'),select,message,h('div',{class:'review-columns'},[images,h('div',{},[text,preview,kp])]),save,retry)
+    view.append(
+      h('div',{class:'page-head'},[
+        h('h1',{class:'page-title'},'待校对'),
+        h('div',{class:'head-actions'},[h('a',{class:'btn btn-sm',href:'#/batch'},'← 返回批量上传')]),
+      ]),
+      h('div',{class:'card review-toolbar'},[
+        h('div',{class:'head-actions'},[select,message]),
+        h('div',{class:'head-actions'},[retry,save]),
+      ]),
+      h('div',{class:'review-columns'},[
+        images,
+        h('div',{class:'card'},[
+          h('div',{class:'section-title',style:'margin-top:0'},'题干校对（支持 Markdown 与 $LaTeX$ 公式）'),
+          text,
+          h('div',{class:'section-title'},'实时渲染预览'),
+          preview,
+          kp,
+        ]),
+      ])
+    )
     await refresh()
   }
 
