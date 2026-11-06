@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import express from 'express'
 import { installBatch } from './batch.js'
-import { installJobRoutes, startJobs } from './jobs.js'
+import { installJobRoutes, startJobs, consumeCall } from './jobs.js'
 
 import db, {
   createUser,
@@ -327,7 +327,7 @@ app.post('/api/ocr', requireAuth, ocrRateLimit, async (req, res) => {
   }
   if (parsed.error) return res.status(400).json({ error: parsed.error })
 
-  const result = await callOcr(parsed.dataUri)
+  const result = await callOcr(parsed.dataUri, { beforeCall: () => consumeCall(req.userId, "ocr") })
   if (result.error) {
     return res.status(result.status || 502).json({ error: result.error, detail: result.detail })
   }
@@ -347,6 +347,7 @@ app.post('/api/suggest', requireAuth, suggestRateLimit, async (req, res) => {
   const stem = String(req.body?.stem || '').trim().slice(0, 4000)
   if (!stem) return res.status(400).json({ error: '缺少题干' })
 
+  consumeCall(req.userId, "grade")
   const result = await suggestQuestionMeta({ stem })
   if (result.error) {
     return res.status(result.status || 502).json({ error: result.error })
@@ -573,6 +574,7 @@ app.post('/api/questions/:id/tutor', requireAuth, tutorRateLimit, async (req, re
     ]).flat()
   }
 
+  consumeCall(req.userId, "grade")
   const result = await callTutor({
     mode,
     question,
@@ -958,6 +960,7 @@ app.use((req, res) => {
 })
 
 app.use((err, req, res, next) => {
+  if (err?.code === 'DAILY_LIMIT') return res.status(429).json({ error: err.message })
   if (err?.type === 'entity.too.large') {
     return res.status(413).json({ error: '请求体过大，请压缩图片后再试' })
   }
