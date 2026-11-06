@@ -280,6 +280,7 @@ async function callChat(baseUrl, apiKey, model, messages, { signal, temperature 
     if (!resp.ok) {
       console.error(`[tutor] ${model} 返回 ${resp.status}: ${text.slice(0, 500)}`)
       return {
+        upstreamStatus: resp.status,
         error: resp.status === 429 ? 'AI 服务限流，请稍后重试' : `AI 服务返回错误（${resp.status}）`,
         status: 502,
       }
@@ -425,4 +426,13 @@ export async function suggestQuestionMeta({ stem, signal } = {}) {
     return { error: 'AI 返回格式无法解析', status: 502, ...base }
   }
   return { ...parsed, tokens: result.tokens, ...base }
+}
+
+export async function callEssayChat(messages) {
+  const config = resolveProvider(process.env.ESSAY_PROVIDER) || ACTIVE
+  const key = process.env.ESSAY_API_KEY || config?.apiKey
+  const base = process.env.ESSAY_BASE_URL || config?.baseUrl
+  const model = process.env.ESSAY_MODEL || config?.model
+  if (!key || !base || !model) return {error:'服务端未配置作文模型，请使用外部批改'}
+  return {...await callChat(base.replace(/\/$/, ''),key,model,messages),model}
 }

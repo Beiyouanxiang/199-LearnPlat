@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import express from 'express'
 import { installBatch } from './batch.js'
+import { installEssays } from './essays.js'
 import { installJobRoutes, startJobs, consumeCall } from './jobs.js'
 
 import db, {
@@ -953,6 +954,7 @@ app.post('/api/import', requireAuth, async (req, res) => {
 
 installJobRoutes(app, requireAuth, ocrRateLimit)
 installBatch(app, requireAuth, ocrRateLimit, withAccessUrl)
+installEssays(app, requireAuth, tutorRateLimit, makeRateLimit)
 
 // ---------- 404 / 错误 ----------
 app.use((req, res) => {
