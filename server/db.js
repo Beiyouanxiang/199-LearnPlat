@@ -15,7 +15,8 @@ function ensureMode(dir, file) {
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
     fs.chmodSync(dir, 0o700)
-    if (fs.existsSync(file)) fs.chmodSync(file, 0o600)
+    // 上传目录没有对应文件，不能将空路径传给 existsSync。
+    if (file != null && fs.existsSync(file)) fs.chmodSync(file, 0o600)
   } catch (err) {
     console.warn('[db] 无法设置文件权限:', err.message)
   }
@@ -139,18 +140,10 @@ function addColumnIfMissing(table, column, ddl) {
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
   return true
 }
-// review_stage：连续答对的间隔复习阶段，答错归零
-if (addColumnIfMissing('questions', 'review_stage', 'INTEGER DEFAULT 0')) {
-  // 旧版升级（只执行一次）：旧版不排复习日期，未掌握的题 review_due_at 都是 0，会进不了复习队列。
-  // 按题目 id 分摊到今天起的 7 天里，避免第一天堆积。
-  const DAY = 86400000
-  const TZ = 8 * 3600000
-  const todayStart = Math.floor((Date.now() + TZ) / DAY) * DAY - TZ
-  db.prepare(
-    `UPDATE questions SET review_due_at = ? + (id % 7) * ?
-     WHERE review_due_at = 0 AND mastery != 'mastered'`
-  ).run(todayStart, DAY)
-}
+// review_stage：连续答对的间隔复习阶段，答错归零。
+// 只加列。已有 review_due_at 是用户的复习安排，升级时必须原样保留
+// （含 0：未排期，不进今日队列，但列表和重做仍可用）。
+addColumnIfMissing('questions', 'review_stage', 'INTEGER DEFAULT 0')
 // detail：条件充分性分步作答等结构化信息（JSON）
 addColumnIfMissing('redo_records', 'detail', "TEXT DEFAULT ''")
 
