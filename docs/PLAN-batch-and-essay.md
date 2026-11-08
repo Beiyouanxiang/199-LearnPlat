@@ -118,7 +118,7 @@ OCR 和模型调用都慢（单张 OCR 5–30 秒），批量时不能让浏览�
 1. **个人访问令牌**
    - 新表 `api_tokens`：`id, user_id, name, token_hash(sha256), scopes, last_used_at, created_at, revoked_at`。
    - 设置页可以生成和吊销令牌。令牌明文只显示一次，格式 `lp_` 加 32 字节随机数。
-   - scope 分三种：`essays:read`、`essays:write`、`questions:read`。
+   - scope：`essays:read`、`essays:write`、`questions:read`。后来又加了 `essays:create`（新建作文、上传图片、发起 OCR）和 `questions:write`（录入、修改错题，含图片）。
    - 中间件 `requireToken(scope)`：读 `Authorization: Bearer lp_...` 并单独限流。
 2. **REST 接口**（前缀 `/api/agent/`，只接受令牌）
    - `GET /api/agent/essays?status=ungraded`：列出待批改的作文。

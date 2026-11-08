@@ -10,7 +10,7 @@
 
 ## 在已登录的客户端主动批改
 
-平台运行于本机时可用 http://127.0.0.1:3005。客户端在另一台设备上时，将 URL 换成可访问的 HTTPS 测试实例。平台令牌可在「管理代理令牌」中生成，勾选 essays:read 和 essays:write。只有要读取错题时再勾选 questions:read。
+平台运行于本机时可用 http://127.0.0.1:3005。客户端在另一台设备上时，将 URL 换成可访问的 HTTPS 测试实例。平台令牌可在「管理代理令牌」中生成。批改已有作文时勾选 essays:read 和 essays:write。读取错题再勾选 questions:read。让代理新建作文并上传图片识别时勾选 essays:create。让代理录入或修改错题时勾选 questions:write。每个令牌只能操作签发它的那个账号的数据。
 
 创建仅自己可读、位于仓库外的环境文件，例如 ~/.config/learnplat.env。填入实际 URL、生成的令牌和客户端名称。令牌只会显示一次。
 
@@ -50,6 +50,48 @@ claude mcp add --transport stdio learnplat -- node --env-file=/absolute/path/cla
 
 在客户端发出「批改我最新一篇已校对的作文，并把结果保存到学习平台」。客户端调用 list_ungraded_essays，选择最新作文，用 get_essay 取得材料包，按 response_template 生成结果，然后调用 submit_grading。网页显示该次批改。客户端名称是调用方声明的来源。
 
+## 用令牌新建作文或错题
+
+这两个权限不包含在现有 MCP 工具里，代理直接调用 REST。把下面的 `lp_` 换成自己的令牌；示例不是可用密钥。缺少对应 scope 返回 403。操作别人的作文或错题返回 404。网页上的登录接口不接受这种令牌。
+
+`essays:create` 对应网页上的新建、上传照片和「识别已上传图片」。图片仍是 data URI，单张上限与网页相同。OCR 入队使用和网页一样的突发限额，并计入该用户的每日 OCR 次数。
+
+```bash
+curl -s -X POST "$LEARNPLAT_URL/api/agent/essays" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"essay","source":"练习","year":"2026"}'
+
+curl -s -X POST "$LEARNPLAT_URL/api/agent/essays/1/images" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{"role":"answer","position":0,"image":"data:image/jpeg;base64,..."}'
+
+curl -s -X POST "$LEARNPLAT_URL/api/agent/essays/1/ocr" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+`questions:write` 对应录题页的保存、之后的编辑，以及给已有题补图。创建时可以在 `images` 里直接带上 data URI，和网页一次保存相同。
+
+```bash
+curl -s -X POST "$LEARNPLAT_URL/api/agent/questions" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{"subject":"math","stem":"求 $x+1=2$","user_answer":"x=0","correct_answer":"x=1"}'
+
+curl -s -X PATCH "$LEARNPLAT_URL/api/agent/questions/1" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{"stem":"校对后的题干","error_reason":"计算错误"}'
+
+curl -s -X POST "$LEARNPLAT_URL/api/agent/questions/1/images" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{"image":"data:image/jpeg;base64,..."}'
+```
+
 工具还支持 get_rubric 和 list_wrong_questions。平台仅在用户的客户端会话中读写作文。使用客户端自己的登录方式与额度即可。stdio 服务在客户端设备运行，网页版聊天使用上面的文件交换流程。
 
 ## 量表版本与隔离验收
@@ -58,7 +100,7 @@ claude mcp add --transport stdio learnplat -- node --env-file=/absolute/path/cla
 
 `GET /api/agent/rubric` 与 MCP `get_rubric` 默认读取当前版本；分别加 `?version=2027-training-v1` 或传入 `{"version":"2027-training-v1"}` 可读取旧版。CLI 对应 `rubric [version]`。未知版本返回 404。
 
-在共享机器验收时，另设 `PORT`、`LEARNPLAT_DATA_DIR` 和 `LEARNPLAT_UPLOAD_DIR`，不要复用他人的预览端口或数据目录。两篇原创验收材料在 `tests/fixtures/essays.mjs`。代理令牌只授予 `essays:read`、`essays:write`，环境文件放在仓库外并设为 `chmod 600`。
+在共享机器验收时，另设 `PORT`、`LEARNPLAT_DATA_DIR` 和 `LEARNPLAT_UPLOAD_DIR`，不要复用他人的预览端口或数据目录。两篇原创验收材料在 `tests/fixtures/essays.mjs`。这次批改验收的代理令牌只授予 `essays:read`、`essays:write`，环境文件放在仓库外并设为 `chmod 600`。
 
 可用 Codex 的进程级 `-c` 参数配置一次性 MCP，无需修改用户的配置文件：
 

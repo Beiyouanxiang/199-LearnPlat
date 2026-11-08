@@ -7,12 +7,13 @@ import {callEssayChat} from './providers/tutor.js'
 import {essayStore,digest} from './essay-store.js'
 import {rubric,getRubric} from './content/essay-rubric.js'
 import {problem} from './essay-schema.js'
+import {createQuestionHttp,updateQuestionHttp,addQuestionImageHttp} from './question-write.js'
 const store=essayStore(db)
 const images=(u,id)=>db.prepare('SELECT * FROM essay_images WHERE user_id=? AND essay_id=? ORDER BY role,position').all(u,id)
 const imageLocks=new Set()
 const activeImage=(user,id)=>imageLocks.has(user+':'+id)
 const safe=fn=>async(req,res,next)=>{try{await fn(req,res)}catch(e){if(e.status)res.status(e.status).json({error:e.message});else next(e)}}
-const validScopes=['essays:read','essays:write','questions:read']
+const validScopes=['essays:read','essays:write','essays:create','questions:read','questions:write']
 function tokenAuth(scope) {
   return (req,res,next)=>{
     const match=/^Bearer (lp_[a-f0-9]{64})$/.exec(req.headers.authorization||'')
@@ -71,17 +72,19 @@ handlers.set('essay_grade',async job=>{
   throw new Error('结果校验失败：'+error)
 })
 export function installEssays(app,auth,limit,makeRateLimit) {
+  const agentLimit=makeRateLimit(60000,60,q=>String(q.userId))
   const list=user=>db.prepare('SELECT id,kind,source,year,status,revision,created_at FROM essays WHERE user_id=? ORDER BY id DESC LIMIT 200').all(user)
   const readGrade=db.prepare('SELECT id,grader,rubric_version,result,transcript,revision,created_at FROM essay_gradings WHERE user_id=? AND essay_id=? ORDER BY id DESC LIMIT 100')
   app.get('/api/essays',auth,(q,r)=>r.json({items:list(q.userId),scores:db.prepare('SELECT essay_id,total,max,created_at FROM essay_gradings WHERE user_id=? ORDER BY created_at DESC LIMIT 100').all(q.userId)}))
-  app.post('/api/essays',auth,safe((q,r)=>r.json(store.create(q.userId,q.body||{}))))
+  const createEssay=safe((q,r)=>r.json(store.create(q.userId,q.body||{})))
+  app.post('/api/essays',auth,createEssay)
   app.get('/api/essays/:id',auth,safe((q,r)=>{
     const id=Number(q.params.id)
     r.json({...store.get(q.userId,id),images:images(q.userId,id).map(({id,role,position})=>({id,role,position})),
       rubric,gradings:readGrade.all(q.userId,id).map(g=>({...g,result:JSON.parse(g.result),rubric:getRubric(g.rubric_version)||null})),
       jobs:db.prepare("SELECT id,status,error,kind FROM jobs WHERE user_id=? AND ref_id=? AND kind IN ('essay_ocr','essay_grade') ORDER BY id DESC LIMIT 12").all(q.userId,id)})
   }))
-  app.post('/api/essays/:id/images',auth,safe(async(q,r)=>{
+  const uploadEssayImage=safe(async(q,r)=>{
     const id=Number(q.params.id),user=q.userId,b=q.body||{},key=user+':'+id
     const e=store.get(user,id)
     if(activeImage(user,id))problem('图片正在保存，请稍后重试',409)
@@ -98,18 +101,21 @@ export function installEssays(app,auth,limit,makeRateLimit) {
       const row=db.prepare('INSERT INTO essay_images(user_id,essay_id,role,position,hash,file_path,mime) VALUES(?,?,?,?,?,?,?)').run(user,id,b.role,b.position,hash,m.file_path,parsed.mime)
       r.json({id:Number(row.lastInsertRowid)})
     }finally{imageLocks.delete(key)}
-  }))
+  })
   app.get('/api/essays/:id/images/:image',auth,safe((q,r)=>{
     const im=db.prepare('SELECT file_path,mime FROM essay_images WHERE user_id=? AND essay_id=? AND id=?').get(q.userId,Number(q.params.id),Number(q.params.image))
     if(!im)problem('图片不存在',404)
     r.type(im.mime).sendFile(getImageAbsPath(im.file_path))
   }))
-  app.post('/api/essays/:id/ocr',auth,limit,safe((q,r)=>{
+  const queueEssayOcr=safe((q,r)=>{
     const id=Number(q.params.id),e=store.get(q.userId,id)
     if(e.revision||activeImage(q.userId,id)||!images(q.userId,id).length)problem('请在校对前完成图片上传',409)
     const j=jobStore.enqueue(q.userId,'essay_ocr',id,String(id))
     r.json({id:j.id,status:j.status})
-  }))
+  })
+  app.post('/api/essays/:id/images',auth,uploadEssayImage)
+  // 与网页相同的突发限额，避免令牌绕过 OCR 入队限流。
+  app.post('/api/essays/:id/ocr',auth,limit,queueEssayOcr)
   app.post('/api/essays/:id/confirm',auth,safe((q,r)=>{
     if(activeImage(q.userId,Number(q.params.id)))problem('请等待图片保存',409)
     r.json(store.confirm(q.userId,Number(q.params.id),q.body||{}))
@@ -142,7 +148,6 @@ export function installEssays(app,auth,limit,makeRateLimit) {
     const t=db.prepare('UPDATE api_tokens SET revoked_at=? WHERE user_id=? AND id=?').run(Date.now(),q.userId,Number(q.params.id))
     r.status(t.changes?200:404).json(t.changes?{ok:true}:{error:'令牌不存在'})
   })
-  const agentLimit=makeRateLimit(60000,60,q=>String(q.userId))
   app.get('/api/agent/rubric',tokenAuth('essays:read'),agentLimit,safe((q,r)=>{
     const selected=getRubric(q.query.version)
     if(!selected)problem('未知量表版本',404)
@@ -158,4 +163,11 @@ export function installEssays(app,auth,limit,makeRateLimit) {
     r.json(store.submit(q.userId,Number(q.params.id),q.body,grader))
   }))
   app.get('/api/agent/questions',tokenAuth('questions:read'),agentLimit,(q,r)=>r.json({items:listQuestions(q.userId,{untidy:q.query.untidy==='1',kp:String(q.query.kp||''),limit:100})}))
+  // 令牌只多一层 scope 和代理限流，处理函数与网页相同，归属仍按 user_id。
+  app.post('/api/agent/essays',tokenAuth('essays:create'),agentLimit,createEssay)
+  app.post('/api/agent/essays/:id/images',tokenAuth('essays:create'),agentLimit,uploadEssayImage)
+  app.post('/api/agent/essays/:id/ocr',tokenAuth('essays:create'),agentLimit,limit,queueEssayOcr)
+  app.post('/api/agent/questions',tokenAuth('questions:write'),agentLimit,createQuestionHttp)
+  app.patch('/api/agent/questions/:id',tokenAuth('questions:write'),agentLimit,updateQuestionHttp)
+  app.post('/api/agent/questions/:id/images',tokenAuth('questions:write'),agentLimit,addQuestionImageHttp)
 }

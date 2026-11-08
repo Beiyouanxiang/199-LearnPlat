@@ -220,7 +220,14 @@ window.essayPages = function ({h,view,API,toast,onLeave,preprocessImage,makeUUID
   }
   async function tokens() {
     const name=h('input',{value:'学习助手'}),list=h('div',{class:'essay-list',style:'margin-top:14px'}),secret=h('div',{style:'margin-top:12px'})
-    const scopes=['essays:read','essays:write','questions:read'].map(s=>h('input',{type:'checkbox',value:s,checked:s.startsWith('essays:')}))
+    const scopeChoices=[
+      ['essays:read','读取已校对作文',true],
+      ['essays:write','回写批改结果',true],
+      ['essays:create','创建作文、上传图片并识别',false],
+      ['questions:read','读取错题',false],
+      ['questions:write','录入和修改错题',false],
+    ]
+    const scopes=scopeChoices.map(([value,,on])=>h('input',{type:'checkbox',value,checked:on}))
     async function reload(){const data=await API.req('/api/tokens');list.replaceChildren(...data.items.map(t=>h('div',{class:'card essay-row'},[
       h('div',{class:'essay-row-main'},[h('strong',{},t.name),h('span',{class:'dim'},JSON.parse(t.scopes).join(' · '))]),
       t.revoked_at?h('span',{class:'pill pill-muted'},'已吊销'):button('吊销',async()=>{await API.req('/api/tokens/'+t.id,{method:'DELETE'});secret.replaceChildren();await reload()},'btn btn-sm btn-danger'),
@@ -232,7 +239,7 @@ window.essayPages = function ({h,view,API,toast,onLeave,preprocessImage,makeUUID
       ]),
       h('div',{class:'card essay-form-card'},[
         field('令牌名称',name),
-        h('div',{class:'token-scopes'},scopes.map(i=>h('label',{},[i,i.value]))),
+        h('div',{class:'token-scopes'},scopes.map((input,i)=>h('label',{title:scopeChoices[i][1]},[input,input.value,h('span',{class:'dim'},' '+scopeChoices[i][1])]))),
         h('div',{class:'essay-btn-row'},[
           button('生成令牌',async()=>{const x=await post('/api/tokens',{name:name.value,scopes:scopes.filter(i=>i.checked).map(i=>i.value)})
             secret.replaceChildren(h('p',{class:'error'},'请现在复制到本机客户端；离开页面后无法再次查看。'),h('label',{class:'field'},[h('textarea',{readonly:true,rows:2},x.token)]));await reload()},'btn btn-primary'),
