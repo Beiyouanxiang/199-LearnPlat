@@ -1,8 +1,8 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { Jimp } from 'jimp'
 import Database from 'better-sqlite3'
+import { prepareImage } from './image-work.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -286,49 +286,28 @@ function deleteFts(questionId) {
   console.log(`[db] FTS 迁移完成，重建 ${questions.length} 条索引`)
 })()
 
-// ---------- 缩略图 ----------
-async function makeThumbnail(srcPath, destPath, maxSide = 240) {
-  try {
-    const image = await Jimp.read(srcPath)
-    if (image.bitmap.width > maxSide || image.bitmap.height > maxSide) {
-      image.scaleToFit({ w: maxSide, h: maxSide })
-    }
-    await image.write(destPath, 'image/jpeg')
-    return true
-  } catch (err) {
-    console.warn('[db] thumbnail failed:', err.message)
-    return false
-  }
-}
-
 // ---------- 图片文件存储 ----------
-// 返回相对 uploads 的路径，用于数据库与 URL
+// 先缩小再落盘。长边超过 2000 的原图不会原样写入。
 function relPath(absPath) {
   return path.relative(UPLOAD_DIR, absPath).replace(/\\/g, '/')
 }
 
-export async function saveImageFile(userId, questionId, buffer, mime, ext) {
+export async function saveImageFile(userId, questionId, buffer) {
+  const prepared = await prepareImage(buffer)
   const dir = path.join(UPLOAD_DIR, String(userId), String(questionId))
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   const base = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const ext2 = ext || (mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg')
-  const absImg = path.join(dir, `${base}.${ext2}`)
+  const ext = prepared.mime === 'image/png' ? 'png' : 'jpg'
+  const absImg = path.join(dir, `${base}.${ext}`)
   const absThumb = path.join(dir, `${base}_thumb.jpg`)
-  fs.writeFileSync(absImg, buffer, { mode: 0o600 })
-  await makeThumbnail(absImg, absThumb)
-  let width = 0
-  let height = 0
-  try {
-    const img = await Jimp.read(absImg)
-    width = img.bitmap.width
-    height = img.bitmap.height
-  } catch {}
+  fs.writeFileSync(absImg, prepared.buffer, { mode: 0o600 })
+  fs.writeFileSync(absThumb, prepared.thumb, { mode: 0o600 })
   return {
     file_path: relPath(absImg),
     thumbnail_path: relPath(absThumb),
-    mime: mime || 'image/jpeg',
-    width,
-    height,
+    mime: prepared.mime,
+    width: prepared.width,
+    height: prepared.height,
   }
 }
 

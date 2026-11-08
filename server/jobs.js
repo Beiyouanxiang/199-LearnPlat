@@ -1,5 +1,10 @@
 import db from './db.js'
 import { createJobStore } from './job-store.js'
+import { availableMemoryBytes, minFreeBytes, runImageTask } from './image-work.js'
+
+const imageKinds = new Set(['essay_ocr', 'ocr_question'])
+export function imageMemoryOk() { return availableMemoryBytes() >= minFreeBytes() }
+export { runImageTask }
 
 export const jobStore=createJobStore(db)
 export const handlers=new Map()
@@ -21,10 +26,17 @@ export function startJobs() {
       // 所有 OCR kind 共用限额，避免题目与作文各自占满并发。
       const count=()=>kind==='essay_grade'?(active.get(kind)||0):[...active].filter(([k])=>k!=='essay_grade').reduce((a,[,v])=>a+v,0)
       while(count()<limit) {
+        if (imageKinds.has(kind) && !imageMemoryOk()) {
+          jobStore.postponeReady(kind, Math.max(1, Number(process.env.IMAGE_RETRY_AFTER || 30)) * 1000)
+          break
+        }
         const j=jobStore.claim(kind); if(!j)break
         active.set(kind,(active.get(kind)||0)+1)
         Promise.resolve().then(()=>handler(j)).then(result=>jobStore.done(j,result))
-          .catch(e=>{const retry=jobStore.fail(j,e.message,e.retryable===true); handler.onError?.(j,e,!retry)})
+          .catch(e=>{
+            if (e?.code === 'MEMORY_LOW') { jobStore.defer(j, (e.retryAfter || 30) * 1000); return }
+            const retry=jobStore.fail(j,e.message,e.retryable===true); handler.onError?.(j,e,!retry)
+          })
           .finally(()=>active.set(kind,(active.get(kind)||1)-1))
       }
     }

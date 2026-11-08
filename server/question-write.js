@@ -36,7 +36,15 @@ export async function createQuestionHttp(req, res) {
     // 未指定时由 createQuestion 默认安排明天复习
     review_due_at: Number.isFinite(b.review_due_at) ? b.review_due_at : undefined,
   }
-  const hasImages = Array.isArray(b.images) && b.images.length > 0
+  const parsedImages = []
+  if (Array.isArray(b.images)) {
+    for (const image of b.images) {
+      const parsed = parseImageInput({ image })
+      if (parsed.status === 413) return res.status(413).json({ error: parsed.error })
+      if (!parsed.error) parsedImages.push(parsed)
+    }
+  }
+  const hasImages = parsedImages.length > 0
   // 快速收藏：只有图片、暂不录题干也允许保存，之后再整理
   if (!data.stem && !data.stem_raw && !hasImages) {
     return res.status(400).json({ error: '题干和图片至少要有一项' })
@@ -49,14 +57,11 @@ export async function createQuestionHttp(req, res) {
   const question = createQuestion(req.userId, data)
 
   // 保存多图（修复：原版只 saveImageFile 未 addImage，导致关联图片数为 0）
-  if (Array.isArray(b.images) && b.images.length) {
-    for (let i = 0; i < b.images.length; i++) {
-      const parsed = parseImageInput({ image: b.images[i] })
-      if (parsed.error) continue
-      const buffer = Buffer.from(parsed.b64, 'base64')
-      const meta = await saveImageFile(req.userId, question.id, buffer, parsed.mime)
-      addImage(req.userId, question.id, meta, i)
-    }
+  for (let i = 0; i < parsedImages.length; i++) {
+    const parsed = parsedImages[i]
+    const buffer = Buffer.from(parsed.b64, 'base64')
+    const meta = await saveImageFile(req.userId, question.id, buffer)
+    addImage(req.userId, question.id, meta, i)
   }
 
   const full = getQuestion(req.userId, question.id)
@@ -94,9 +99,9 @@ export async function addQuestionImageHttp(req, res) {
   const q = getQuestion(req.userId, qid)
   if (!q) return res.status(404).json({ error: '题目不存在' })
   const parsed = parseImageInput(req.body || {})
-  if (parsed.error) return res.status(400).json({ error: parsed.error })
+  if (parsed.error) return res.status(parsed.status || 400).json({ error: parsed.error })
   const buffer = Buffer.from(parsed.b64, 'base64')
-  const meta = await saveImageFile(req.userId, qid, buffer, parsed.mime)
+  const meta = await saveImageFile(req.userId, qid, buffer)
   const imgs = listImages(req.userId, qid)
   const sortOrder = imgs.length
   const id = addImage(req.userId, qid, meta, sortOrder)

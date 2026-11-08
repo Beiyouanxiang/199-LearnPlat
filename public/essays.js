@@ -178,14 +178,20 @@ window.essayPages = function ({h,view,API,toast,onLeave,preprocessImage,makeUUID
     }
     const files=h('input',{type:'file',accept:'image/*',multiple:true})
     const role=h('select',{},[h('option',{value:'answer'},'答题照片'),h('option',{value:'material'},'材料照片')])
+    const uploadStatus=h('p',{class:'dim',role:'status'})
     const uploads=h('div',{class:'card essay-upload-bar'},[role,files,button('上传所选图片',async()=>{
+      const chosen=[...files.files]
       const position=e.images.filter(im=>im.role===role.value).length
-      for(const [i,f] of [...files.files].entries()){
+      let fallback=false
+      for(const [i,f] of chosen.entries()){
+        uploadStatus.textContent='正在压缩并上传第 '+(i+1)+'/'+chosen.length+' 张…'
         const image=await preprocessImage(f)
+        fallback=fallback||image.compressed===false
         await post(url+'/images',{role:role.value,position:position+i,image:image.dataUri})
       }
+      uploadStatus.textContent=fallback?'有图片未能压缩，已按原图上传':'已压缩后逐张上传'
       files.value='';e=await API.req(url);await showImages()
-    }),button('识别已上传图片',async()=>{await post(url+'/ocr');await refresh()},'btn btn-primary')])
+    }),button('识别已上传图片',async()=>{await post(url+'/ocr');await refresh()},'btn btn-primary'),uploadStatus])
     uploads.hidden=!!e.revision
     view.append(
       h('div',{class:'page-head'},[

@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs'
 import db,{listQuestions,saveImageFile,getImageAbsPath} from './db.js'
 import {jobStore,handlers,consumeCall,modelError} from './jobs.js'
 import {parseImageInput,callOcr} from './providers/ocr.js'
+import {runImageTask} from './image-work.js'
 import {callEssayChat} from './providers/tutor.js'
 import {essayStore,digest} from './essay-store.js'
 import {rubric,getRubric} from './content/essay-rubric.js'
@@ -12,7 +13,10 @@ const store=essayStore(db)
 const images=(u,id)=>db.prepare('SELECT * FROM essay_images WHERE user_id=? AND essay_id=? ORDER BY role,position').all(u,id)
 const imageLocks=new Set()
 const activeImage=(user,id)=>imageLocks.has(user+':'+id)
-const safe=fn=>async(req,res,next)=>{try{await fn(req,res)}catch(e){if(e.status)res.status(e.status).json({error:e.message});else next(e)}}
+const safe=fn=>async(req,res,next)=>{try{await fn(req,res)}catch(e){
+  if(e.code==='MEMORY_LOW')res.set('Retry-After',String(e.retryAfter||30))
+  if(e.status)res.status(e.status).json({error:e.message});else next(e)
+}}
 const validScopes=['essays:read','essays:write','essays:create','questions:read','questions:write']
 function tokenAuth(scope) {
   // 数组表示持有其中任一权限即可，单权限的 403 文案保持不变。
@@ -33,8 +37,12 @@ handlers.set('essay_ocr',async job=>{
   if(e.revision)throw new Error('已有校对稿')
   const parts=job.result.parts||[]
   for(const im of images(job.user_id,e.id).slice(parts.length)){
-    consumeCall(job.user_id,'ocr')
-    const r=await callOcr('data:'+im.mime+';base64,'+readFileSync(getImageAbsPath(im.file_path)).toString('base64'))
+    const r=await runImageTask(async()=>{
+      consumeCall(job.user_id,'ocr')
+      const bytes=readFileSync(getImageAbsPath(im.file_path))
+      const dataUri='data:'+im.mime+';base64,'+bytes.toString('base64')
+      return callOcr(dataUri)
+    })
     if(r.error)throw modelError(r)
     if(!r.markdown?.trim())throw new Error('识别文本为空，请手动录入')
     parts.push({role:im.role,text:r.markdown})
@@ -94,15 +102,15 @@ export function installEssays(app,auth,limit,makeRateLimit) {
     if(activeImage(user,id))problem('图片正在保存，请稍后重试',409)
     if(!['material','answer'].includes(b.role)||!Number.isInteger(b.position)||b.position<0||b.position>=20)problem('图片类型或序号无效',400)
     const parsed=parseImageInput(b)
-    if(parsed.error)problem(parsed.error,400)
+    if(parsed.error)problem(parsed.error,parsed.status||400)
     const buffer=Buffer.from(parsed.b64,'base64'),hash=digest(buffer)
     const existing=images(user,id).find(im=>im.role===b.role&&im.position===b.position)
     if(existing){if(existing.hash!==hash)problem('该位置已有其他图片',409);return r.json({id:existing.id})}
     if(e.revision||db.prepare("SELECT id FROM jobs WHERE user_id=? AND ref_id=? AND kind='essay_ocr'").get(user,id))problem('OCR或校对开始后不能追加图片',409)
     imageLocks.add(key)
     try{
-      const m=await saveImageFile(user,'essay-'+id,buffer,parsed.mime)
-      const row=db.prepare('INSERT INTO essay_images(user_id,essay_id,role,position,hash,file_path,mime) VALUES(?,?,?,?,?,?,?)').run(user,id,b.role,b.position,hash,m.file_path,parsed.mime)
+      const m=await saveImageFile(user,'essay-'+id,buffer)
+      const row=db.prepare('INSERT INTO essay_images(user_id,essay_id,role,position,hash,file_path,mime) VALUES(?,?,?,?,?,?,?)').run(user,id,b.role,b.position,hash,m.file_path,m.mime)
       r.json({id:Number(row.lastInsertRowid)})
     }finally{imageLocks.delete(key)}
   })
