@@ -50,11 +50,13 @@ claude mcp add --transport stdio learnplat -- node --env-file=/absolute/path/cla
 
 在客户端发出「批改我最新一篇已校对的作文，并把结果保存到学习平台」。客户端调用 list_ungraded_essays，选择最新作文，用 get_essay 取得材料包，按 response_template 生成结果，然后调用 submit_grading。网页显示该次批改。客户端名称是调用方声明的来源。
 
-## 用令牌新建作文或错题
+## 用令牌完成一篇作文
 
-这两个权限不包含在现有 MCP 工具里，代理直接调用 REST。把下面的 `lp_` 换成自己的令牌；示例不是可用密钥。缺少对应 scope 返回 403。操作别人的作文或错题返回 404。网页上的登录接口不接受这种令牌。
+这些步骤不在现有 MCP 工具里，代理直接调用 REST。把 `lp_<64位十六进制>` 换成自己的令牌；下面的示例不是可用密钥。缺少所需 scope 返回 403。操作别人的作文返回 404。网页上的登录接口不接受这种令牌。
 
-`essays:create` 对应网页上的新建、上传照片和「识别已上传图片」。图片仍是 data URI，单张上限与网页相同。OCR 入队使用和网页一样的突发限额，并计入该用户的每日 OCR 次数。
+整条链路是：创建 → 上传图片 → 发起 OCR → 轮询草稿 → 确认校对稿 → 拉取材料包 → 提交批改。创建、上传、识别需要 `essays:create`。读草稿和确认校对稿接受 `essays:create` 或 `essays:write`。拉取材料包需要 `essays:read`。提交批改需要 `essays:write`。已有的五个权限都勾上时，一个令牌可以走完。
+
+图片仍是 data URI，单张上限与网页相同。OCR 入队使用和网页一样的突发限额，并计入该用户的每日 OCR 次数。
 
 ```bash
 curl -s -X POST "$LEARNPLAT_URL/api/agent/essays" \
@@ -72,6 +74,40 @@ curl -s -X POST "$LEARNPLAT_URL/api/agent/essays/1/ocr" \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
+
+OCR 完成前，`GET /api/agent/essays/1` 仍是材料包接口，未确认时返回 409「请先确认转写文本」。轮询请改用草稿：
+
+```bash
+curl -s "$LEARNPLAT_URL/api/agent/essays/1/draft" \
+  -H "Authorization: Bearer lp_<64位十六进制>"
+```
+
+草稿返回识别文本 `ocr_text`、图片列表 `images`、`status` 和 `revision`，以及与网页详情相同的任务状态 `jobs`。`ocr_text` 出现正文后即可确认。`revision` 必须原样带回；过期的 revision 返回 409「已有新版本，请刷新」，与网页相同。
+
+```bash
+curl -s -X POST "$LEARNPLAT_URL/api/agent/essays/1/confirm" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{"revision":0,"transcript":"校对后的正文","prompt_text":"题目材料"}'
+```
+
+确认成功后，用 `essays:read` 拉取材料包。这一步才会生成批改用的 `request_id`：
+
+```bash
+curl -s "$LEARNPLAT_URL/api/agent/essays/1" \
+  -H "Authorization: Bearer lp_<64位十六进制>"
+```
+
+`request_id` 不来自创建作文，也不由代理自己编。它是这次 GET 材料包时服务器生成的 UUID，同时出现在响应顶层的 `request_id` 和 `response_template.request_id`，两边相同。材料包还会给出 `essay_id`、`transcript_revision`、`rubric_version`、`schema_version`。提交时把 `response_template` 整份带回，只往里面的 `result` 填批改结果。再 GET 一次会得到另一个 `request_id`；必须提交和这份结果对应的那一个。同一个 `request_id` 配上完全相同的结果只会保存一条；结果不同则返回 409。
+
+```bash
+curl -s -X POST "$LEARNPLAT_URL/api/agent/essays/1/gradings" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{"request_id":"<材料包 response_template.request_id>","essay_id":1,"transcript_revision":1,"rubric_version":"2027-verified-v1","schema_version":"1","result":{}}'
+```
+
+`result` 按材料包里的 `output_schema` 填写。CLI 的 `get` 和 MCP 的 `get_essay` 走的也是这个材料包接口，所以它们返回的 `request_id` 同样是提交时应使用的那一个。
 
 `questions:write` 对应录题页的保存、之后的编辑，以及给已有题补图。创建时可以在 `images` 里直接带上 data URI，和网页一次保存相同。
 

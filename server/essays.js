@@ -15,11 +15,14 @@ const activeImage=(user,id)=>imageLocks.has(user+':'+id)
 const safe=fn=>async(req,res,next)=>{try{await fn(req,res)}catch(e){if(e.status)res.status(e.status).json({error:e.message});else next(e)}}
 const validScopes=['essays:read','essays:write','essays:create','questions:read','questions:write']
 function tokenAuth(scope) {
+  // 数组表示持有其中任一权限即可，单权限的 403 文案保持不变。
+  const allowed=Array.isArray(scope)?scope:[scope]
   return (req,res,next)=>{
     const match=/^Bearer (lp_[a-f0-9]{64})$/.exec(req.headers.authorization||'')
     const token=match&&db.prepare('SELECT * FROM api_tokens WHERE token_hash=? AND revoked_at IS NULL').get(digest(match[1]))
     if(!token)return res.status(401).json({error:'平台令牌无效或已吊销'})
-    if(!JSON.parse(token.scopes).includes(scope))return res.status(403).json({error:'缺少权限 '+scope})
+    const held=JSON.parse(token.scopes)
+    if(!allowed.some(s=>held.includes(s)))return res.status(403).json({error:'缺少权限 '+(Array.isArray(scope)?allowed.join(' 或 '):scope)})
     req.userId=token.user_id
     db.prepare('UPDATE api_tokens SET last_used_at=? WHERE user_id=? AND id=?').run(Date.now(),req.userId,token.id)
     next()
@@ -78,12 +81,13 @@ export function installEssays(app,auth,limit,makeRateLimit) {
   app.get('/api/essays',auth,(q,r)=>r.json({items:list(q.userId),scores:db.prepare('SELECT essay_id,total,max,created_at FROM essay_gradings WHERE user_id=? ORDER BY created_at DESC LIMIT 100').all(q.userId)}))
   const createEssay=safe((q,r)=>r.json(store.create(q.userId,q.body||{})))
   app.post('/api/essays',auth,createEssay)
-  app.get('/api/essays/:id',auth,safe((q,r)=>{
+  const readEssay=safe((q,r)=>{
     const id=Number(q.params.id)
     r.json({...store.get(q.userId,id),images:images(q.userId,id).map(({id,role,position})=>({id,role,position})),
       rubric,gradings:readGrade.all(q.userId,id).map(g=>({...g,result:JSON.parse(g.result),rubric:getRubric(g.rubric_version)||null})),
       jobs:db.prepare("SELECT id,status,error,kind FROM jobs WHERE user_id=? AND ref_id=? AND kind IN ('essay_ocr','essay_grade') ORDER BY id DESC LIMIT 12").all(q.userId,id)})
-  }))
+  })
+  app.get('/api/essays/:id',auth,readEssay)
   const uploadEssayImage=safe(async(q,r)=>{
     const id=Number(q.params.id),user=q.userId,b=q.body||{},key=user+':'+id
     const e=store.get(user,id)
@@ -116,10 +120,11 @@ export function installEssays(app,auth,limit,makeRateLimit) {
   app.post('/api/essays/:id/images',auth,uploadEssayImage)
   // 与网页相同的突发限额，避免令牌绕过 OCR 入队限流。
   app.post('/api/essays/:id/ocr',auth,limit,queueEssayOcr)
-  app.post('/api/essays/:id/confirm',auth,safe((q,r)=>{
+  const confirmEssay=safe((q,r)=>{
     if(activeImage(q.userId,Number(q.params.id)))problem('请等待图片保存',409)
     r.json(store.confirm(q.userId,Number(q.params.id),q.body||{}))
-  }))
+  })
+  app.post('/api/essays/:id/confirm',auth,confirmEssay)
   app.post('/api/essays/:id/package',auth,safe((q,r)=>r.json(store.bundle(q.userId,Number(q.params.id)))))
   app.post('/api/essays/:id/preview',auth,safe((q,r)=>r.json(store.preview(q.userId,Number(q.params.id),q.body))))
   app.post('/api/essays/:id/gradings',auth,safe((q,r)=>{
@@ -158,6 +163,10 @@ export function installEssays(app,auth,limit,makeRateLimit) {
     r.json({items:list(q.userId).filter(e=>status.includes(e.status))})
   })
   app.get('/api/agent/essays/:id',tokenAuth('essays:read'),agentLimit,safe((q,r)=>r.set('Cache-Control','no-store').json(store.bundle(q.userId,Number(q.params.id)))))
+  // 材料包在未确认时返回 409。草稿和确认复用网页的同一套归属与版本检查。
+  const essayDraft=tokenAuth(['essays:create','essays:write'])
+  app.get('/api/agent/essays/:id/draft',essayDraft,agentLimit,(q,r,next)=>{r.set('Cache-Control','no-store');return readEssay(q,r,next)})
+  app.post('/api/agent/essays/:id/confirm',essayDraft,agentLimit,confirmEssay)
   app.post('/api/agent/essays/:id/gradings',tokenAuth('essays:write'),agentLimit,safe((q,r)=>{
     const grader=['codex','claude'].includes(q.body?.grader)?q.body.grader:'agent'
     r.json(store.submit(q.userId,Number(q.params.id),q.body,grader))

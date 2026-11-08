@@ -78,6 +78,74 @@ test('questions:write 可创建、修改和补图，缺权限与跨用户被拒�
   assert.equal(web.status,200)
   assert.equal(web.data.user_id,user.id)
 })
+function grading(bundle) {
+  return {...bundle.response_template,result:{rubric_version:bundle.rubric_version,total:19,max:35,band:'三类卷',
+    dimensions:Object.entries(bundle.rubric.essay.dimensions).map(([name,max],i)=>({name,max,score:[5,6,4,4][i],comment:'训练样例'})),
+    thesis:'观点明确',structure:'先写协作再写边界',issues:[
+      {quote:'协作',kind:'结构',problem:'概念未展开',fix:'说明谁和谁协作'}],
+    rewrite_sample:'协作需要明确共同目标。',next_focus:['补一个限制条件']}}
+}
+test('未确认作文可读草稿并确认，过期 revision 冲突，随后能提交批改',async()=>{
+  const agent=await token(['essays:create','essays:read','essays:write'])
+  const onlyRead=await token(['essays:read'])
+  const stranger=await token(['essays:create','essays:write'],otherJwt)
+  const created=await api('/api/agent/essays',{kind:'essay',source:'练习',year:'2026'},agent)
+  assert.equal(created.status,200)
+  const id=created.data.id
+  assert.equal((await api('/api/agent/essays/'+id+'/images',{role:'answer',position:0,image:png},agent)).status,200)
+  assert.equal((await api('/api/agent/essays/'+id+'/ocr',{},agent)).status,200)
+  assert.equal((await api('/api/agent/essays/'+id,undefined,onlyRead)).status,409)
+  assert.equal((await api('/api/agent/essays/'+id,undefined,onlyRead)).data.error,'请先确认转写文本')
+  assert.equal((await api('/api/agent/essays/'+id+'/draft',undefined,onlyRead)).status,403)
+  assert.equal((await api('/api/agent/essays/'+id+'/confirm',{revision:0,transcript:'协作需要分工。'},onlyRead)).status,403)
+  assert.equal((await api('/api/agent/essays/'+id+'/draft',undefined,stranger)).status,404)
+  assert.equal((await api('/api/agent/essays/'+id+'/confirm',{revision:0,transcript:'协作需要分工。'},stranger)).status,404)
+  let draft
+  for(let i=0;i<50;i++){
+    draft=await api('/api/agent/essays/'+id+'/draft',undefined,agent)
+    if(draft.data.ocr_text?.includes('模拟识别'))break
+    await new Promise(r=>setTimeout(r,100))
+  }
+  assert.equal(draft.status,200)
+  assert.equal(draft.data.revision,0)
+  assert.equal(draft.data.status,'uploaded')
+  assert.match(draft.data.ocr_text,/模拟识别/)
+  assert.deepEqual(draft.data.images.map(im=>({role:im.role,position:im.position})),[{role:'answer',position:0}])
+  const confirmed=await api('/api/agent/essays/'+id+'/confirm',{revision:0,transcript:'协作需要分工。',prompt_text:'题目材料'},agent)
+  assert.equal(confirmed.status,200)
+  assert.equal(confirmed.data.revision,1)
+  assert.equal(confirmed.data.status,'transcribed')
+  assert.equal(confirmed.data.transcript,'协作需要分工。')
+  const conflict=await api('/api/agent/essays/'+id+'/confirm',{revision:0,transcript:'过期稿'},agent)
+  assert.equal(conflict.status,409)
+  assert.equal(conflict.data.error,'已有新版本，请刷新')
+  const web=await api('/api/essays/'+id+'/confirm',{revision:0,transcript:'网页也拒绝过期稿'})
+  assert.equal(web.status,409)
+  assert.equal(web.data.error,conflict.data.error)
+  assert.equal((await api('/api/essays/'+id)).data.transcript,'协作需要分工。')
+  const bundle=await api('/api/agent/essays/'+id,undefined,agent)
+  assert.equal(bundle.status,200)
+  assert.match(bundle.data.request_id,/^[0-9a-f-]{36}$/)
+  assert.equal(bundle.data.request_id,bundle.data.response_template.request_id)
+  assert.equal(bundle.data.transcript_revision,1)
+  const saved=await api('/api/agent/essays/'+id+'/gradings',grading(bundle.data),agent)
+  assert.equal(saved.status,200)
+  assert.equal(typeof saved.data.id,'number')
+  assert.equal((await api('/api/essays/'+id)).data.gradings[0].grader,'agent')
+})
+test('essays:write 也能读草稿并确认，questions:read 不能',async()=>{
+  const essay=(await api('/api/essays',{kind:'essay'})).data
+  const writer=await token(['essays:write'])
+  const reader=await token(['questions:read'])
+  const draft=await api('/api/agent/essays/'+essay.id+'/draft',undefined,writer)
+  assert.equal(draft.status,200)
+  assert.equal(draft.data.revision,0)
+  assert.equal((await api('/api/agent/essays/'+essay.id+'/draft',undefined,reader)).status,403)
+  const confirmed=await api('/api/agent/essays/'+essay.id+'/confirm',{revision:0,transcript:'只回写权限也可以确认。'},writer)
+  assert.equal(confirmed.status,200)
+  assert.equal(confirmed.data.revision,1)
+  assert.equal((await api('/api/agent/essays/'+essay.id+'/confirm',{revision:1,transcript:'读者不能确认'},reader)).status,403)
+})
 test('未知 scope 不能签发，两个新权限互不包含',async()=>{
   assert.equal((await api('/api/tokens',{scopes:['essays:admin']})).status,400)
   const essay=await token(['essays:create'])
