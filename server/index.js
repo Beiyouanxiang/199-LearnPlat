@@ -9,6 +9,7 @@ import { installBatch } from './batch.js'
 import { installEssays } from './essays.js'
 import { createQuestionHttp, updateQuestionHttp, addQuestionImageHttp } from './question-write.js'
 import { installJobRoutes, startJobs, consumeCall } from './jobs.js'
+import { JSON_BODY_LIMIT, prepareImage } from './image-work.js'
 
 import db, {
   createUser,
@@ -140,7 +141,7 @@ const app = express()
 app.disable('x-powered-by')
 // 生产经本机 Nginx 反代，只信任回环地址的 X-Forwarded-For，避免伪造 IP 绕过限流
 app.set('trust proxy', 'loopback')
-app.use(express.json({ limit: '20mb' }))
+app.use(express.json({ limit: JSON_BODY_LIMIT }))
 
 // 安全响应头
 app.use((req, res, next) => {
@@ -316,19 +317,19 @@ app.post('/api/ocr', requireAuth, ocrRateLimit, async (req, res) => {
   }
   // 支持 string | string[]：数组=多图合并识别（智谱 layout_parsing 的 file 接受 string[]）
   const raw = req.body?.image
-  let parsed
-  if (Array.isArray(raw)) {
-    if (!raw.length) return res.status(400).json({ error: '缺少 image 字段' })
-    parsed = parseImageInput({ image: raw[0] })
-    if (!parsed.error && raw.length > 1) {
-      parsed.dataUri = raw // 透传数组
-    }
-  } else {
-    parsed = parseImageInput(req.body || {})
+  const sources = Array.isArray(raw) ? raw : [typeof raw === 'string' ? raw : req.body]
+  if (!sources.length || (sources.length === 1 && sources[0] == null)) {
+    return res.status(400).json({ error: '缺少 image 字段' })
   }
-  if (parsed.error) return res.status(400).json({ error: parsed.error })
+  const uris = []
+  for (const source of sources) {
+    const parsed = parseImageInput(typeof source === 'string' ? { image: source } : (source || {}))
+    if (parsed.error) return res.status(parsed.status || 400).json({ error: parsed.error })
+    const prepared = await prepareImage(Buffer.from(parsed.b64, 'base64'))
+    uris.push(`data:${prepared.mime};base64,${prepared.buffer.toString('base64')}`)
+  }
 
-  const result = await callOcr(parsed.dataUri, { beforeCall: () => consumeCall(req.userId, "ocr") })
+  const result = await callOcr(uris.length === 1 ? uris[0] : uris, { beforeCall: () => consumeCall(req.userId, "ocr") })
   if (result.error) {
     return res.status(result.status || 502).json({ error: result.error, detail: result.detail })
   }
@@ -829,10 +830,10 @@ app.post('/api/import', requireAuth, async (req, res) => {
       for (let i = 0; i < item.images.length; i++) {
         const im = item.images[i]
         if (!im.data) continue
-        const m = String(im.data).match(/^data:([^;,]+);base64,(.*)$/s)
-        if (!m) continue
-        const buffer = Buffer.from(m[2], 'base64')
-        const meta = await saveImageFile(req.userId, q.id, buffer, m[1])
+        const parsed = parseImageInput({ image: im.data })
+        if (parsed.status === 413) return res.status(413).json({ error: parsed.error })
+        if (parsed.error) continue
+        const meta = await saveImageFile(req.userId, q.id, Buffer.from(parsed.b64, 'base64'))
         addImage(req.userId, q.id, meta, i)
       }
     }
@@ -881,8 +882,12 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
   if (err?.code === 'DAILY_LIMIT') return res.status(429).json({ error: err.message })
+  if (err?.code === 'MEMORY_LOW') {
+    res.set('Retry-After', String(err.retryAfter || 30))
+    return res.status(503).json({ error: err.message })
+  }
   if (err?.type === 'entity.too.large') {
-    return res.status(413).json({ error: '请求体过大，请压缩图片后再试' })
+    return res.status(413).json({ error: '请求体过大，单张图片请控制在 8MB 以内并压缩后再试' })
   }
   console.error('[exam199] 未处理异常:', err)
   res.status(500).json({ error: '服务器内部错误' })

@@ -548,7 +548,7 @@
     const zone = h('div', { class: 'capture-zone', tabindex: '0' }, [
       h('div', { class: 'cz-icon' }, '📷'),
       h('div', {}, '点击选择 / 拖拽 / 粘贴图片（Ctrl/⌘+V）'),
-      h('div', { class: 'cz-hint' }, '支持一题多图，用于跨页题目'),
+      h('div', { class: 'cz-hint' }, '自动压成 JPEG，长边不超过 2000px，一次上传一张'),
     ])
     const fileInput = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/bmp', multiple: 'true', style: 'display:none' })
     // capture 属性直接调起系统相机
@@ -574,11 +574,16 @@
     card.appendChild(cameraInput)
     card.appendChild(cameraBtn)
 
+    const imageStatus = h('p', { class: 'dim', role: 'status', style: 'min-height:1.2em' })
     async function handleFiles(files) {
-      for (const f of files) {
-        if (!f.type.startsWith('image/')) continue
-        const dataUri = await fileToDataUri(f)
-        images.push({ dataUri, mime: f.type })
+      const list = [...files]
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i]
+        if (!f.type?.startsWith('image/')) continue
+        imageStatus.textContent = `正在压缩第 ${i + 1}/${list.length} 张…`
+        const im = await preprocessImage(f)
+        images.push({ dataUri: im.dataUri, mime: im.compressed ? 'image/jpeg' : (f.type || 'image/jpeg') })
+        imageStatus.textContent = im.compressed ? '已压缩，长边不超过 2000 像素' : '这张图未能压缩，将按原图上传'
       }
       renderStrip()
     }
@@ -608,8 +613,8 @@
         ctx.translate(c.width / 2, c.height / 2)
         ctx.rotate(Math.PI / 2)
         ctx.drawImage(img, -img.width / 2, -img.height / 2)
-        images[i].dataUri = c.toDataURL('image/png')
-        images[i].mime = 'image/png'
+        images[i].dataUri = c.toDataURL('image/jpeg', 0.8)
+        images[i].mime = 'image/jpeg'
         renderStrip()
       }
       img.src = images[i].dataUri
@@ -621,6 +626,29 @@
       renderStrip()
     }
     card.appendChild(strip)
+    card.appendChild(imageStatus)
+
+    // 一次只传一张，避免多张原图同时进服务器内存。
+    async function uploadQuestionImages(questionId, list) {
+      for (let i = 0; i < list.length; i++) {
+        imageStatus.textContent = `正在上传第 ${i + 1}/${list.length} 张…`
+        await API.req('/api/questions/' + questionId + '/images', { method: 'POST', body: { image: list[i].dataUri } })
+      }
+      if (list.length) imageStatus.textContent = '图片已上传'
+    }
+    async function saveQuestionWithImages(payload, list) {
+      const body = { ...payload }
+      delete body.images
+      if (!body.stem && !body.stem_raw && !(list && list.length)) throw new Error('题干和图片至少要有一项')
+      if (!body.stem && !body.stem_raw) {
+        const q = await API.req('/api/questions', { method: 'POST', body: { ...body, images: [list[0].dataUri] } })
+        await uploadQuestionImages(q.id, list.slice(1))
+        return q
+      }
+      const q = await API.req('/api/questions', { method: 'POST', body })
+      await uploadQuestionImages(q.id, list || [])
+      return q
+    }
 
     // 快速收藏：只存图片，之后在"待整理"里补充
     const form = buildQuestionForm()
@@ -628,7 +656,7 @@
       quickBtn.disabled = true
       try {
         const v = form.values()
-        await API.req('/api/questions', { method: 'POST', body: { ...v, images: images.map((im) => im.dataUri) } })
+        await saveQuestionWithImages(v, images.slice())
         toast('已收藏，可在“待整理”里补充')
         images.length = 0
         renderStrip()
@@ -707,9 +735,7 @@
             for (let i = 0; i < blocks.length; i++) {
               const block = blocks[i]
               const title = block.split('\n')[0].replace(/^\s*\d+[.、)）]\s*/, '').slice(0, 50) || `题 ${i + 1}`
-              const q = await API.req('/api/questions', { method: 'POST', body: {
-                ...v, title, stem: block, stem_raw: rawMd, images: images.map((im) => im.dataUri),
-              } })
+              const q = await saveQuestionWithImages({ ...v, title, stem: block, stem_raw: rawMd }, images.slice())
               ids.push(q.id)
             }
             toast(`已创建 ${ids.length} 道题`)
@@ -736,17 +762,17 @@
 
     const saveBtn = h('button', { class: 'btn btn-primary btn-block', style: 'margin-top:16px', onclick: save }, '💾 保存到错题本')
     async function save() {
+      const list = images.slice()
       const payload = {
         ...form.values(),
         stem: stemField.value,
         stem_raw: stemField.dataset.ocrRaw || stemField.value,
-        images: images.map((im) => im.dataUri),
       }
-      if (!payload.stem && !payload.images.length) return toast('题干和图片至少要有一项')
+      if (!payload.stem && !list.length) return toast('题干和图片至少要有一项')
       saveBtn.disabled = true
       saveBtn.textContent = '保存中…'
       try {
-        const q = await API.req('/api/questions', { method: 'POST', body: payload })
+        const q = await saveQuestionWithImages(payload, list)
         toast('已保存，明天会出现在复习里')
         location.hash = '#/question/' + q.id
       } catch (err) {
@@ -1644,6 +1670,17 @@
     if (!ok) throw new Error('当前浏览器限制自动复制，请改用下载或手动复制')
   }
 
+  // ---------- 上传前缩放（长边不超过 2000）----------
+  function fitLongEdge(width, height, maxEdge = 2000) {
+    const w = Math.max(0, Math.round(Number(width) || 0))
+    const h = Math.max(0, Math.round(Number(height) || 0))
+    if (w < 1 || h < 1) return { width: 1, height: 1 }
+    const long = Math.max(w, h)
+    if (long <= maxEdge) return { width: w, height: h }
+    const scale = maxEdge / long
+    return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) }
+  }
+
   // ---------- 批量上传与校对 ----------
   let batchOwner = 0
   function draftDB() {
@@ -1662,18 +1699,28 @@
     })}finally{db.close()}
   }
   async function preprocessImage(file) {
-    if(!file.type.startsWith('image/'))throw new Error('请选择图片')
-    // 浏览器解码阶段应用 EXIF 方向，不再重复旋转。
-    const bitmap=await createImageBitmap(file,{imageOrientation:'from-image'})
+    if(!file.type?.startsWith('image/'))throw new Error('请选择图片')
     try{
-      const scale=Math.min(1,2000/Math.max(bitmap.width,bitmap.height))
-      const c=document.createElement('canvas');c.width=Math.max(1,Math.round(bitmap.width*scale));c.height=Math.max(1,Math.round(bitmap.height*scale))
-      c.getContext('2d').drawImage(bitmap,0,0,c.width,c.height)
-      const blob=await new Promise(resolve=>c.toBlob(resolve,'image/jpeg',0.85))
-      if(!blob)throw new Error('图片压缩失败')
-      const hash=await sha256Hex(await blob.arrayBuffer())
-      return {dataUri:await fileToDataUri(blob),hash}
-    }finally{bitmap.close()}
+      // 浏览器解码阶段应用 EXIF 方向，不再重复旋转。
+      const bitmap=await createImageBitmap(file,{imageOrientation:'from-image'})
+      try{
+        const size=fitLongEdge(bitmap.width,bitmap.height,2000)
+        const canvas=typeof OffscreenCanvas==='function'
+          ? new OffscreenCanvas(size.width,size.height)
+          : Object.assign(document.createElement('canvas'),size)
+        canvas.getContext('2d').drawImage(bitmap,0,0,size.width,size.height)
+        const blob=await new Promise((resolve,reject)=>{
+          if(canvas.convertToBlob)canvas.convertToBlob({type:'image/jpeg',quality:0.8}).then(resolve,reject)
+          else canvas.toBlob(b=>b?resolve(b):reject(new Error('图片压缩失败')),'image/jpeg',0.8)
+        })
+        const hash=await sha256Hex(await blob.arrayBuffer())
+        return {dataUri:await fileToDataUri(blob),hash,compressed:true}
+      }finally{bitmap.close?.()}
+    }catch{
+      // 旧浏览器或无法解码的格式仍上传原图，服务端限额继续生效。
+      const hash=await sha256Hex(await file.arrayBuffer())
+      return {dataUri:await fileToDataUri(file),hash,compressed:false}
+    }
   }
   async function renderBatch() {
     let draft=await draftStorage()||{batch:makeUUID(),groups:[],subject:'math',source:'',tags:''}
@@ -1711,8 +1758,11 @@
       if(busy||preparing)return
       preparing=true;picker.disabled=true
       try{
-        for(const f of files){
+        const list=[...files]
+        for(let n=0;n<list.length;n++){
+          const f=list[n]
           if(draft.groups.length>=100)throw new Error('每批最多100题')
+          status.textContent='正在压缩第 '+(n+1)+'/'+list.length+' 张…'
           const im=await preprocessImage(f)
           const known=draft.groups.some(g=>g.images.some(x=>x.hash===im.hash))
           const remote=await API.req('/api/batch/duplicates',{method:'POST',body:{hashes:[im.hash]}})
@@ -1731,7 +1781,7 @@
     },[
       h('div',{class:'cz-icon'},'📚'),
       h('div',{},'点击选择、拖拽或粘贴（Ctrl/⌘+V）多张错题图片'),
-      h('div',{class:'cz-hint'},'自动压缩至 2000px 并去重 · 跨页题上传前可点「合并下一题」'),
+      h('div',{class:'cz-hint'},'自动压成 JPEG，长边不超过 2000px · 一次上传一张 · 跨页题可点「合并下一题」'),
       picker,
     ])
     pasteHandler=e=>{const fs=[...e.clipboardData.files];if(fs.length){e.preventDefault();add(fs)}}
@@ -1747,13 +1797,16 @@
         try{
           g.error=''
           if(!g.qid){const q=await API.req('/api/batch/questions',{method:'POST',body:{request_id:g.key,batch:draft.batch,count:g.images.length,subject:draft.subject,source:draft.source,tags:draft.tags.split(/[,，]/).map(s=>s.trim()).filter(Boolean)}});g.qid=q.question_id;await save()}
-          for(let i=0;i<g.images.length;i++)await API.req('/api/batch/questions/'+g.qid+'/images',{method:'POST',body:{position:i,image:g.images[i].dataUri}})
+          for(let i=0;i<g.images.length;i++){
+            status.textContent='正在上传第 '+(i+1)+'/'+g.images.length+' 张…'
+            await API.req('/api/batch/questions/'+g.qid+'/images',{method:'POST',body:{position:i,image:g.images[i].dataUri}})
+          }
           const j=await API.req('/api/questions/'+g.qid+'/ocr',{method:'POST',body:{}})
           g.done=true;g.job=j.id
         }catch(e){g.error=e.message}
         await save();if(!gone)draw()
       }}
-      try{await Promise.all([worker(),worker(),worker()])}
+      try{await worker()}
       finally{busy=false;window.removeEventListener('beforeunload',unload);upload.disabled=false;picker.disabled=false;subject.disabled=false;source.disabled=false;tags.disabled=false;if(!gone)draw()}
       toast('上传结束。已入队任务在后台继续；失败项可点击继续上传。')
     }},'上传 / 继续失败项')

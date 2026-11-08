@@ -21,6 +21,8 @@ if(oldSource){
   await fs.symlink(fileURLToPath(new URL('../node_modules',import.meta.url)),path.join(root,'node_modules'),'dir')
   oldSource=oldSource.replace(/const ROOT =[^\n]+/, 'const ROOT = '+JSON.stringify(root))
   // 只适配旧夹具的空文件路径；保留 origin/main 的全部建库与写入 SQL。
+  // 旧库夹具只建用户和题目，不解码图片。当前生产依赖已不再安装 jimp。
+  oldSource=oldSource.replace("import { Jimp } from 'jimp'\n", '')
   oldSource=oldSource.replace('if (fs.existsSync(file))', 'if (file != null && fs.existsSync(file))')
   await fs.writeFile(fixture,oldSource)
   const old=await import(fixture.href)

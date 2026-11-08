@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import crypto from 'node:crypto'
 import db, {createQuestion,getQuestion,updateQuestion,saveImageFile,addImage,listImages,getImageAbsPath,dayStartAfter} from './db.js'
 import {parseImageInput,callOcr} from './providers/ocr.js'
+import {runImageTask} from './image-work.js'
 import {isTutorAvailable,suggestQuestionMeta} from './providers/tutor.js'
 import {handlers,jobStore,consumeCall,modelError} from './jobs.js'
 import {ALL_POINTS} from './content/math.js'
@@ -33,9 +34,13 @@ const ocr=async j=>{
   const images=listImages(j.user_id,j.ref_id)
   const parts=j.result.parts||[]
   for(let i=parts.length;i<images.length;i++){
-    consumeCall(j.user_id,'ocr')
     const im=images[i]
-    const r=await callOcr('data:'+im.mime+';base64,'+fs.readFileSync(getImageAbsPath(im.file_path)).toString('base64'))
+    const r=await runImageTask(async()=>{
+      consumeCall(j.user_id,'ocr')
+      const bytes=fs.readFileSync(getImageAbsPath(im.file_path))
+      const dataUri='data:'+im.mime+';base64,'+bytes.toString('base64')
+      return callOcr(dataUri)
+    })
     if(r.error)throw modelError(r)
     if(!r.markdown?.trim())throw new Error('识别结果为空，请手动转写或重试')
     parts.push(r.markdown); jobStore.checkpoint(j,{parts})
@@ -74,14 +79,14 @@ export function installBatch(app,auth,limit,withAccessUrl) {
     const it=item(req.userId,id)
     if(!it)return res.status(404).json({error:'批量题目不存在'})
     if(!Number.isInteger(b.position)||b.position<0||b.position>=it.expected_count)return res.status(400).json({error:'图片序号不合法'})
-    const p=parseImageInput(b);if(p.error)return res.status(400).json(p)
+    const p=parseImageInput(b);if(p.error)return res.status(p.status||400).json({error:p.error})
     const hash=crypto.createHash('sha256').update(Buffer.from(p.b64,'base64')).digest('hex')
     await serial(req.userId+':'+id,async()=>{
       const prior=db.prepare('SELECT * FROM batch_images WHERE user_id=? AND question_id=? AND position=?').get(req.userId,id,b.position)
       if(prior){if(prior.hash!==hash)return res.status(409).json({error:'该位置已有不同图片，请新建题目'});return res.json(prior)}
       const started=db.prepare("SELECT id FROM jobs WHERE user_id=? AND kind='ocr_question' AND ref_id=?").get(req.userId,id)
       if(started)return res.status(409).json({error:'已开始识别，不可追加图片'})
-      const meta=await saveImageFile(req.userId,id,Buffer.from(p.b64,'base64'),p.mime)
+      const meta=await saveImageFile(req.userId,id,Buffer.from(p.b64,'base64'))
       const save=db.transaction(()=>{
         const imageId=addImage(req.userId,id,meta,b.position)
         db.prepare('INSERT INTO batch_images VALUES(?,?,?,?,?)').run(req.userId,id,b.position,imageId,hash)

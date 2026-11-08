@@ -54,9 +54,7 @@ claude mcp add --transport stdio learnplat -- node --env-file=/absolute/path/cla
 
 这些步骤不在现有 MCP 工具里，代理直接调用 REST。把 `lp_<64位十六进制>` 换成自己的令牌；下面的示例不是可用密钥。缺少所需 scope 返回 403。操作别人的作文返回 404。网页上的登录接口不接受这种令牌。
 
-整条链路是：创建 → 上传图片 → 发起 OCR → 轮询草稿 → 确认校对稿 → 拉取材料包 → 提交批改。创建、上传、识别需要 `essays:create`。读草稿和确认校对稿接受 `essays:create` 或 `essays:write`。拉取材料包需要 `essays:read`。提交批改需要 `essays:write`。已有的五个权限都勾上时，一个令牌可以走完。
-
-图片仍是 data URI，单张上限与网页相同。OCR 入队使用和网页一样的突发限额，并计入该用户的每日 OCR 次数。
+推荐走纯文本：在客户端自己识别图片，不要把原图上传到平台，也不要调用平台 OCR。创建作文后直接确认校对稿，再拉材料包、提交批改。创建需要 `essays:create`。确认校对稿接受 `essays:create` 或 `essays:write`。拉取材料包需要 `essays:read`。提交批改需要 `essays:write`。已有的五个权限都勾上时，一个令牌可以走完。
 
 ```bash
 curl -s -X POST "$LEARNPLAT_URL/api/agent/essays" \
@@ -64,6 +62,17 @@ curl -s -X POST "$LEARNPLAT_URL/api/agent/essays" \
   -H "Content-Type: application/json" \
   -d '{"kind":"essay","source":"练习","year":"2026"}'
 
+curl -s -X POST "$LEARNPLAT_URL/api/agent/essays/1/confirm" \
+  -H "Authorization: Bearer lp_<64位十六进制>" \
+  -H "Content-Type: application/json" \
+  -d '{"revision":0,"transcript":"校对后的正文","prompt_text":"题目材料"}'
+```
+
+没有图片、也没有跑过 OCR 时，`revision` 仍是 0，可以直接确认。网页登录用户的确认接口行为不变。
+
+如果确实要上传照片，请先在客户端压缩：长边不超过 2000 像素，JPEG 质量约 80，单张尽量小于 1MB，并且一次只传一张。传完用草稿接口核对；请求超时后先看草稿里是否已经有这张图，不要立刻再传一遍。服务端还会再缩小一次。单张解码后超过 8MB，或整段请求体装不下这一张图，返回 413，正文说明要压缩。内存不足时返回 503，并带 `Retry-After`，过一会儿再试；已经入队的 OCR 会推迟而不是记成失败。
+
+```bash
 curl -s -X POST "$LEARNPLAT_URL/api/agent/essays/1/images" \
   -H "Authorization: Bearer lp_<64位十六进制>" \
   -H "Content-Type: application/json" \

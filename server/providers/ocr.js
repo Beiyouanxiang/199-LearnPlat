@@ -1,5 +1,6 @@
 // OCR provider 适配层：复用 OCR-Page（/data/data_home/xuyifan/OCR-Page）的智谱 GLM-OCR 调用经验。
 // 仅提取通用识别能力，不耦合其用户/数据库/密钥。来源记录见 README「复用说明」。
+import { MAX_IMAGE_BYTES } from '../image-work.js'
 
 const GLM_API_KEY = process.env.GLM_API_KEY || ''
 const GLM_OCR_URL =
@@ -21,7 +22,6 @@ export function getOcrInfo() {
 
 // ---------- 图片输入校验（复用 OCR-Page parseImageInput）----------
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/bmp'])
-const MAX_IMAGE_BYTES = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024)
 
 export function parseImageInput(body) {
   const raw = typeof body?.image === 'string' ? body.image : ''
@@ -48,7 +48,11 @@ export function parseImageInput(body) {
   }
   const bytes = Math.floor((b64.length * 3) / 4)
   if (bytes > MAX_IMAGE_BYTES) {
-    return { error: `图片过大（约 ${(bytes / 1024 / 1024).toFixed(1)}MB），单图上限 ${MAX_IMAGE_BYTES / 1024 / 1024}MB` }
+    const limitMb = Math.round(MAX_IMAGE_BYTES / 1024 / 1024)
+    return {
+      error: `图片过大（解码后约 ${(bytes / 1024 / 1024).toFixed(1)}MB），单张上限 ${limitMb}MB，请压缩后再上传`,
+      status: 413,
+    }
   }
   return { mime, b64, bytes, dataUri: `data:${mime};base64,${b64}` }
 }

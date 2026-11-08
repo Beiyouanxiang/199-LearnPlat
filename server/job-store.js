@@ -45,6 +45,19 @@ export function createJobStore(db) {
         .run(retry?'queued':'failed',String(error).slice(0,400),Date.now()+1000*2**j.attempts,Date.now(),j.user_id,j.id)
       return retry
     },
+    // 内存不够时推迟，不记失败、不消耗重试次数。
+    defer(j, delayMs) {
+      const now = Date.now()
+      db.prepare(`UPDATE jobs SET status='queued', attempts=MAX(attempts-1,0), error='', next_run_at=?, updated_at=?
+        WHERE user_id=? AND id=?`).run(now + delayMs, now, j.user_id, j.id)
+      return get(j.user_id, j.id)
+    },
+    postponeReady(kind, delayMs) {
+      const now = Date.now()
+      const info = db.prepare(`UPDATE jobs SET next_run_at=?, updated_at=?
+        WHERE kind=? AND status='queued' AND next_run_at<=?`).run(now + delayMs, now, kind, now)
+      return info.changes
+    },
     retry(user,id) {
       db.prepare("UPDATE jobs SET status='queued',attempts=0,error='',next_run_at=0,updated_at=? WHERE user_id=? AND id=? AND status='failed'")
         .run(Date.now(),user,id)
