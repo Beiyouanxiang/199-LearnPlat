@@ -31,7 +31,7 @@ if(oldSource){
   old.default.close()
 }
 const {default:app}=await import('../server/index.js')
-const {default:db,createUser,dayStartAfter}=await import('../server/db.js')
+const {default:db,createUser}=await import('../server/db.js')
 const {signToken}=await import('../server/auth.js')
 const {startJobs}=await import('../server/jobs.js')
 const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r))
@@ -49,10 +49,8 @@ test('旧库数据保留与30题批量后台识别',async()=>{
     assert.deepEqual(db.prepare('SELECT * FROM users WHERE id=1').get(),legacy.user)
     const upgraded=db.prepare('SELECT * FROM questions WHERE user_id=1').get()
     for(const [key,value] of Object.entries(legacy.question)){
-      // 冲刺版已有迁移会为旧题补排复习日，其余原有字段须逐项保留。
-      const expected=key==='review_due_at'&&value===0&&!Object.hasOwn(legacy.question,'review_stage')
-        &&legacy.question.mastery!=='mastered'?dayStartAfter(upgraded.id%7):value
-      assert.equal(upgraded[key],expected,key)
+      // 升级只加列，不得改写已有复习日期（含 review_due_at = 0）。
+      assert.equal(upgraded[key],value,key)
     }
     assert.equal(db.prepare("SELECT COUNT(*) n FROM questions_fts WHERE questions_fts MATCH '旧'").get().n,1)
     assert.equal(db.pragma('integrity_check',{simple:true}),'ok')
